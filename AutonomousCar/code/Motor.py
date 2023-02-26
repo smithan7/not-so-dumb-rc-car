@@ -26,8 +26,10 @@ class Motor:
     max_rpm = 0.0
     specific_heat_coeff = 0.0
     specific_heat_mass = 0.0
+    convective_heat_coeff = 0.0
     mass = 0.0
-    
+    heat_generated = 0.0
+    heat_expelled = 0.0
     current = 0.0
     voltage = 0.0
     torque_Nm = 0.0
@@ -47,7 +49,9 @@ class Motor:
         self.max_voltage = motorParams.max_voltage
         self.max_specd_rpm = motorParams.max_specd_rpm
         self.specific_heat_coeff = motorParams.specific_heat_coeff
+        self.convective_heat_coeff = motorParams.convective_heat_coeff
         self.mass = motorParams.mass
+        
         
     def calc_vals(self):
         self.surface_area = 2.0 * math.pi*(self.diam/2.0)**2 + math.pi*self.diam*self.length*self.length_scalar_for_fins
@@ -57,18 +61,38 @@ class Motor:
         self.radius = self.diam / 2.0
         self.specific_heat_mass = self.specific_heat_coeff * self.mass
 
+    def print(self):
+        print("Motor: Name: ", self.name)
+        print("Motor: KV: ", self.kv)
+        print("Motor: Max Battery Cells: ", self.max_battery_cells)
+        print("Motor: Max Voltage: ", self.max_voltage, " V")
+        print("Motor: Max spec'd RPM: ", self.max_specd_rpm)
+        print("Motor: KT: ", self.kt)
+        print("Motor: Resistance: ", self.resistance, " Ohms")
+        print("Motor: Diameter: ", self.diam, " m")
+        print("Motor: Length: ", self.length, " m")
+        print("Motor: Length Scalar for Fins: ", self.length_scalar_for_fins)
+        print("Motor: Surface Area: ", self.surface_area, " m^2")
+        print("Motor: Max Temp: ", self.max_temp, " C")
+        print("Motor: Mass: ", self.mass, " g")
+        print("Motor: Specific Heat Coeff: ", self.specific_heat_coeff, " J/(g * deg C)")
+        print("Motor: Convective Heat Coeff: ", self.convective_heat_coeff, " w/(m^2 deg C)")
+        print("Motor: Current: ", self.current, " A")
+        print("Motor: Voltage: ", self.voltage, " g")
+        print("Motor: Torque: ", self.torque_Nm, " Nm")
+        print("Motor: Speed: ", self.rpm, " RPM")
+        print("Motor: Temperature: ", self.temp, " C") 
+        
     def calc_heat_generated(self, current):
         '''Estimate heat generated over this time step'''
-        heat_generated = self.resistance * current**2
-        return heat_generated
+        self.heat_generated = self.resistance * current**2
+        return self.heat_generated
     
-    def calc_motor_temp_change(self, power_in, T_prior, dt):
-        #Q = c * m * (T2 - T1)
-        Q = power_in * dt # heat input J - power in (w=J/s) * dt (s)
-        T1 = T_prior # deg C
-        T2 = Q / self.specific_heat_mass + T1 # deg C
-        return T2
-                
+    def calc_motor_temp_change(self, power_in, dt):
+        #Q = c * m * (T2 - T1) # heat input J - power in (w=J/s) * dt (s)
+        self.temp = (power_in * dt) / self.specific_heat_mass + self.temp # deg C
+        return self.temp
+           
     def update_heat_model(self, current, air_speed, air_temp, dt):
         '''Estimate current temperature based upon incoming heat and expected dissipation'''
         # calc the heat generated over the last tic
@@ -76,16 +100,13 @@ class Motor:
         # calc the heat expelled due to convection on the motor
         p_expelled = self.calc_heat_expelled(air_speed, air_temp)
         # update moor temp
-        self.temp = self.calc_motor_temp_change(p_gen - p_expelled, self.temp, dt)
+        self.temp = self.calc_motor_temp_change(p_gen - p_expelled, dt)
         
-    def calc_heat_expelled(self, external_temp, air_temp):
+    def calc_heat_expelled(self, air_speed, air_temp):
         # convection equation
         #q = h_c * A * dT =  # heat transfered per unit time - watts
-        A = self.surface_area # area of heat transfer surface - m^2
-        h_c = 200.0 # convective heat transfer coefficient of the process - W / (m^2 C) - 200 is an ~upper limit for a cylinder
-        dT = external_temp - air_temp # temperature difference between the surface and the fluid - C
-        Q = h_c * A * dT # rate of heat expulsion - W - J/s
-        return Q # power expelled as heat
+        self.heat_expelled = self.convective_heat_coeff * self.surface_area * (self.temp - air_temp) # rate of heat expulsion - W - J/s
+        return self.heat_expelled # power expelled as heat
         
     def calc_motor_torque(self, current, rpm):
         '''Estimate total torque based on current'''
@@ -100,7 +121,7 @@ class Motor:
         self.current = torque_Nm / (self.kt * oz_in_to_Nm * (1 - rpm / self.max_rpm))
         return self.current
     
-    def calc_motor_rpm_from_volts(self, volts):
-        self.volts = volts
-        self.rpm = volts * self.kv  
+    def calc_motor_rpm_from_voltage(self, voltage):
+        self.voltage = voltage
+        self.rpm = voltage * self.kv  
         return self.rpm

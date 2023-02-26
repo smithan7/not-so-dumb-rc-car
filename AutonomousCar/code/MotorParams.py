@@ -14,6 +14,7 @@ class MotorParams:
     max_voltage = 0.0
     max_specd_rpm = 0.0
     specific_heat_coeff = 0.0
+    convective_heat_coeff = 0.0
     mass = 0.0
     
     def print(self):
@@ -30,4 +31,6 @@ class MotorParams:
         print("MotorParams: Max Temp: ", self.max_temp, " C")
         print("MotorParams: Mass: ", self.mass, " g")
         print("MotorParams: Specific Heat Coeff: ", self.specific_heat_coeff, " J/(g * deg C)")
+        print("MotorParams: Convective Heat Coeff: ", self.convective_heat_coeff, " w/(m^2 deg C)")
+        
         
