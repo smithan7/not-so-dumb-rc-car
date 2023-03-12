@@ -12,7 +12,8 @@ class Tire:
     specific_heat_coeff = 1.88 # # J/(g * deg C) - specific heat capacity of rubber
     max_temp = 54.4 #TODO - I think it  is around 130F
     tire_hysteresis_coeff = 0.02 # TODO - did some mild tuning
-    
+    h_conduction = 1.0 # TODO - this is an esimtate
+    h_convection = 200.0 # convective heat transfer coefficient of the process - W / (m^2 C) - 200 is an ~upper limit for a cylinder
     contact_patch = 0.0
     radius = 0.0
     tread_depth = 0.0
@@ -44,7 +45,9 @@ class Tire:
         print("TireParams: Mass: ", self.mass, " g")
         print("TireParams: Specific Heat Coeff: ", self.specific_heat_coeff, " J/(g * deg C)")
         print("TireParams: Specific Heat Mass: ", self.specific_heat_mass, " J/(deg C)")
-    
+        print("TireParams: H Convection: ", self.h_convection)
+        print("TireParams: H Conduction: ", self.h_conduction)
+        
     def calc_heat_generated(self, forces, speed):
         '''Estimate heat generated over this time step'''
         # heat is the result of the forces on the tire to the ground * speed
@@ -53,9 +56,8 @@ class Tire:
     
     def calc_temp_change(self, power_in, T_prior, dt):
         #Q = c * m * (T2 - T1)
-        Q = power_in * dt # heat input J - power in (w=J/s) * dt (s)
-        T1 = T_prior # deg C
-        T2 = Q / self.specific_heat_mass + T1 # deg C
+        # Q = power_in * dt # heat input J - power in (w=J/s) * dt (s)
+        T2 = (power_in * dt) / self.specific_heat_mass + T_prior # deg C
         return T2
                 
     def update_heat_model(self, forces, car_speed, air_speed, air_temp, ground_temp, dt):
@@ -70,14 +72,7 @@ class Tire:
     def calc_heat_expelled(self, external_temp, air_temp, ground_temp):
         # convection equation
         #q = h_c * A * dT =  # heat transfered per unit time - watts
-        A = self.surface_area # area of heat transfer surface - m^2
-        h_c = 200.0 # convective heat transfer coefficient of the process - W / (m^2 C) - 200 is an ~upper limit for a cylinder
-        dT = external_temp - air_temp # temperature difference between the surface and the fluid - C
-        Q_conv = h_c * A * dT # rate of heat expulsion - W - J/s
+        Q_conv = self.h_convection * self.surface_area * (external_temp - air_temp) # rate of heat expulsion - W - J/s
         # now for tire in contact with the road
-        A = self.contact_patch #  # area of heat transfer surface - m^2
-        h_c = 1.0 # TODO - this is an esimtate
-        dT = external_temp - ground_temp
-        Q_cond = h_c * A * dT # rate of heat expulsion - W - J/s
-        
+        Q_cond = self.h_conduction * self.contact_patch * (external_temp - ground_temp) # rate of heat expulsion - W - J/s
         return Q_conv + Q_cond# * dt # heat expelled over the last period
