@@ -16,38 +16,53 @@ volatile long ThrottlePulses = 0;
 volatile long SteerPulses = 0;
 int ThrottlePulseWidth = 0;
 int SteerPulseWidth = 0;
+bool newThrottle = false;
+bool newSteer = false;
+int err_cntr = 0;
 
 void setup() {
   //set up the serial monitor, pin mode, and external interrupt.
-  Serial.begin(9600);
+  Serial.begin(115200);
   pinMode(ThrottlePin, INPUT_PULLUP);
   pinMode(SteerPin, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(ThrottlePin),ThrottlePulseTimer,CHANGE);
   attachInterrupt(digitalPinToInterrupt(SteerPin),SteerPulseTimer,CHANGE);
 }
 
-
 void loop() {
-  //only save pulse lengths that are less than 2000 microseconds
-  if (ThrottlePulses < 2000){
-    ThrottlePulseWidth = ThrottlePulses;
-  }  
-  if (SteerPulses < 2000){
-    SteerPulseWidth = SteerPulses;
+  if(newSteer && newThrottle){
+    Serial.print("PWM, 1, ");
+    Serial.print(ThrottlePulseWidth);
+    Serial.print(", ");
+    Serial.println(SteerPulseWidth);
+    newSteer = false;
+    newThrottle = false;
+    err_cntr = 0;
+    delay(50);
+  }
+  else{
+    err_cntr = err_cntr + 1;
   }
 
-  Serial.print("IMU, "
-  Serial.print(ThrottlePulseWidth);
-  Serial.print(", ");
-  
-  Serial.println(SteerPulseWidth);
+  if(err_cntr > 100){
+    Serial.println("PWM, 0, -1, -1");
+    err_cntr = 0;
+    delay(1000);
+  }
 }
 
 void ThrottlePulseTimer(){
+//  Serial.println("throttle in");
   //measure the time between interrupts
   ThrottleCurrentTime = micros();
-  if (ThrottleCurrentTime > ThrottleStartTime){
-    ThrottlePulses = ThrottleCurrentTime - ThrottleStartTime;
+  long dt = ThrottleCurrentTime - ThrottleStartTime;
+//  Serial.print("Throttle dt: ");
+//  Serial.println(dt);
+  if (dt > 0){
+    if (dt >= 900 && dt <= 2100){
+      ThrottlePulseWidth = dt;
+      newThrottle = true;
+    }
     ThrottleStartTime = ThrottleCurrentTime;
   }
 }
@@ -55,8 +70,15 @@ void ThrottlePulseTimer(){
 void SteerPulseTimer(){
   //measure the time between interrupts
   SteerCurrentTime = micros();
-  if (SteerCurrentTime > SteerStartTime){
-    SteerPulses = SteerCurrentTime - SteerStartTime;
+  long dt = SteerCurrentTime - SteerStartTime;
+//  Serial.println(SteerCurrentTime);
+//  Serial.print("Steering dt: ");
+//  Serial.println(dt);
+  if (dt > 0){
+    if (dt >= 900 && dt <= 2100){
+      SteerPulseWidth = dt;
+      newSteer = true;
+    }
     SteerStartTime = SteerCurrentTime;
   }
 }
