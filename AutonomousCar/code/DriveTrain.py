@@ -57,9 +57,15 @@ class DriveTrain:
         self.wheel_rpm = driveshaft_rpm / self.differential_ratio
         return self.wheel_rpm
     
-    def calc_driveshaft_rpm_from_car_speed(self, speed_mps):
+    def calc_driveshaft_rpm_from_car_speed_mps(self, speed_mps):
         self.speed_mps = speed_mps
         self.wheel_rpm = 60.0 * speed_mps / self.tire_circumference
+        self.driveshaft_rpm = self.calc_driveshaft_rpm_from_wheel_rpm(self.wheel_rpm)
+        return self.driveshaft_rpm
+    
+    def calc_driveshaft_rpm_from_car_speed_mph(self, speed_mph):
+        self.speed_mps = speed_mph / mph_to_mps
+        self.wheel_rpm = 60.0 * self.speed_mps / self.tire_circumference
         self.driveshaft_rpm = self.calc_driveshaft_rpm_from_wheel_rpm(self.wheel_rpm)
         return self.driveshaft_rpm
                 
