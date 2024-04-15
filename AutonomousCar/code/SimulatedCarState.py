@@ -30,6 +30,11 @@ class SimulatedCarState:
     sai = 9
     sri = 10
     
+    def __init__(self, x, car_params):
+        self.x = x
+        self.carParams = car_params
+        
+    
     def input_steering(self, u_steer):
         '''Take in a desired steering angle and get the resulting steering rate'''
         # ensure the desired steering angle is possible 

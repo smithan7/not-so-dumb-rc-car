@@ -10,11 +10,11 @@ oz_in_to_Nm = 1.0 / 141.61193227806
 
 class DriveTrain:
     motor_rpm = 0.0
-    pinion = 34.0
-    spur = 34.0
-    differential_ratio = 3.308
+    pinion = 15.0 # https://www.arrma-rc.com/en/product/1-7-infraction-6s-blx-v2-all-road-truck-rtr-blue/ARA7615V2T1.html
+    spur = 46.0 # https://www.arrma-rc.com/en/product/1-7-infraction-6s-blx-v2-all-road-truck-rtr-blue/ARA7615V2T1.html
+    differential_ratio = 2.8 # https://www.arrma-rc.com/en/product/1-7-infraction-6s-blx-v2-all-road-truck-rtr-blue/ARA7615V2T1.html
     final_drive_ratio = differential_ratio * spur / pinion
-    tire_diam = 0.100 # mm
+    tire_diam = 0.100 # 100mm - https://www.arrma-rc.com/en/product/1-7-infraction-6s-blx-v2-all-road-truck-rtr-blue/ARA7615V2T1.html
     tire_radius = tire_diam / 2.0
     tire_circumference = math.pi * tire_diam 
     
@@ -35,18 +35,47 @@ class DriveTrain:
         print("Drive Train: Tire Diameter: ", self.tire_diam, " m")
         print("Drive Train: Tire Circumference: ", self.tire_circumference, " m")
         
-    def calc_car_speed_mph(self, motor_rpm):
+    def calc_car_speed_mph_from_motor_rpm(self, motor_rpm):
         # calculate car speed based on drive train config and motor RPM
         self.motor_rpm = motor_rpm
         self.speed_mps = motor_rpm / self.final_drive_ratio * self.tire_circumference / 60.0
         return self.speed_mps / mph_to_mps
     
-    def calc_car_speed_mps(self, motor_rpm):
+    def calc_car_speed_mps_from_motor_rpm(self, motor_rpm):
         # calculate car speed based on drive train config and motor RPM
         self.motor_rpm = motor_rpm
         self.speed_mps = motor_rpm / self.final_drive_ratio * self.tire_circumference / 60.0
         return self.speed_mps
     
+    def calc_driveshaft_rpm_from_wheel_rpm(self, wheel_rpm):
+        self.wheel_rpm = wheel_rpm
+        self.driveshaft_rpm = wheel_rpm * self.differential_ratio
+        return self.driveshaft_rpm
+                
+    def calc_wheel_rpm_from_driveshaft_rpm(self, driveshaft_rpm):
+        self.driveshaft_rpm = driveshaft_rpm
+        self.wheel_rpm = driveshaft_rpm / self.differential_ratio
+        return self.wheel_rpm
+    
+    def calc_driveshaft_rpm_from_car_speed(self, speed_mps):
+        self.speed_mps = speed_mps
+        self.wheel_rpm = 60.0 * speed_mps / self.tire_circumference
+        self.driveshaft_rpm = self.calc_driveshaft_rpm_from_wheel_rpm(self.wheel_rpm)
+        return self.driveshaft_rpm
+                
+    def calc_car_speed_mps_from_driveshaft_rpm(self, driveshaft_rpm):
+        self.driveshaft_rpm = driveshaft_rpm
+        self.wheel_rpm = self.calc_wheel_rpm_from_driveshaft_rpm(driveshaft_rpm)
+        self.speed_mps = self.wheel_rpm * self.tire_circumference / 60.0
+        return self.speed_mps
+    
+    def calc_car_speed_mph_from_driveshaft_rpm(self, driveshaft_rpm):
+        self.driveshaft_rpm = driveshaft_rpm
+        self.wheel_rpm = self.calc_wheel_rpm_from_driveshaft_rpm(driveshaft_rpm)
+        self.speed_mps = self.wheel_rpm * self.tire_circumference / 60.0
+        return self.speed_mps / mph_to_mps
+    
+           
     def calc_motor_rpm_from_speed_mps(self, speed_mps):
         # calculate motor rpm from car speed based on drive train config
         self.speed_mps = speed_mps
