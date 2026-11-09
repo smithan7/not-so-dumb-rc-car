@@ -1,10 +1,4 @@
-mm_to_in = 0.03937008
-in_to_mm = 1.0 / mm_to_in
-mph_to_mps = 0.44704
-in_to_m = 0.0254
-ft_lbs_to_Nm = 1.0 / 1.355818
-oz_in_to_ft_lbs = 1.0 / 192.00000012288
-oz_in_to_Nm = 1.0 / 141.61193227806
+from units import *  # noqa: F401,F403 - re-exported for notebooks
 
 import math
 
@@ -55,7 +49,8 @@ class Motor:
         
     def calc_vals(self):
         self.surface_area = 2.0 * math.pi*(self.diam/2.0)**2 + math.pi*self.diam*self.length*self.length_scalar_for_fins
-        self.max_voltage = self.max_battery_cells * 3.7
+        # fully charged LiPo (4.2 V/cell); 3.7 V nominal let rpm exceed max_rpm on a fresh pack
+        self.max_voltage = self.max_battery_cells * 4.2
         self.max_rpm = self.max_voltage * self.kv
         self.kt = 1352.0 / self.kv
         self.radius = self.diam / 2.0
@@ -78,7 +73,7 @@ class Motor:
         print("Motor: Specific Heat Coeff: ", self.specific_heat_coeff, " J/(g * deg C)")
         print("Motor: Convective Heat Coeff: ", self.convective_heat_coeff, " w/(m^2 deg C)")
         print("Motor: Current: ", self.current, " A")
-        print("Motor: Voltage: ", self.voltage, " g")
+        print("Motor: Voltage: ", self.voltage, " V")
         print("Motor: Torque: ", self.torque_Nm, " Nm")
         print("Motor: Speed: ", self.rpm, " RPM")
         print("Motor: Temperature: ", self.temp, " C") 
@@ -108,18 +103,35 @@ class Motor:
         self.heat_expelled = self.convective_heat_coeff * self.surface_area * (self.temp - air_temp) # rate of heat expulsion - W - J/s
         return self.heat_expelled # power expelled as heat
         
-    def calc_motor_torque(self, current, rpm):
-        '''Estimate total torque based on current'''
-        # torque decreases linearly based on RPM
+    def calc_motor_torque(self, current, rpm=None):
+        '''Torque from current: T = kt * I.
+
+        The fall-off of torque with speed comes from back-EMF reducing the current
+        (see calc_current_from_voltage), so it must not be applied again here.
+        rpm is accepted for backwards compatibility and ignored.
+        '''
         self.current = current
-        self.torque_Nm = self.kt * current* oz_in_to_Nm * (1 - rpm / self.max_rpm)
+        self.torque_Nm = self.kt * oz_in_to_Nm * current
         return self.torque_Nm
-    
-    def calc_current_from_torque(self, torque_Nm, rpm):
-        '''Estimate current used based on torque requested'''
+
+    def calc_current_from_torque(self, torque_Nm, rpm=None):
+        '''Current needed for a requested torque: I = T / kt. rpm is ignored (see calc_motor_torque).'''
         self.torque_Nm = torque_Nm
-        self.current = torque_Nm / (self.kt * oz_in_to_Nm * (1 - rpm / self.max_rpm))
+        self.current = torque_Nm / (self.kt * oz_in_to_Nm)
         return self.current
+
+    def calc_current_from_voltage(self, voltage, rpm):
+        '''Current drawn at a given applied voltage and speed: I = (V - rpm/kv) / R, floored at 0.'''
+        if self.resistance <= 0.0:
+            raise ValueError("Motor resistance must be > 0 to compute current from voltage")
+        back_emf = rpm / self.kv
+        self.voltage = voltage
+        self.current = max(0.0, (voltage - back_emf) / self.resistance)
+        return self.current
+
+    def calc_max_torque_at_rpm(self, voltage, rpm):
+        '''Torque available at full applied voltage and the given rpm (linear torque-speed curve).'''
+        return self.kt * oz_in_to_Nm * self.calc_current_from_voltage(voltage, rpm)
     
     def calc_motor_rpm_from_voltage(self, voltage):
         self.voltage = voltage

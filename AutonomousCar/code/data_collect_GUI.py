@@ -1,4 +1,5 @@
 import tkinter as tk
+import tkinter.messagebox  # tk.messagebox is not loaded by 'import tkinter'
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 import serial
@@ -96,7 +97,7 @@ class GUI:
             print("steer_pwm: ", self.steer_pwm)
 
         
-        except:
+        except ValueError:
             tk.messagebox.showinfo('Error', "Your data was not formatted properly")  
         
         self.speed_entry.delete(0, tk.END)
@@ -171,8 +172,8 @@ class GUI:
             # update the plots on the canvases
             for canvas in self.canvases:
                 canvas.draw()
-        except:
-            pass
+        except Exception as e:  # keep the GUI alive, but don't hide the problem
+            print("update_plots error:", repr(e))
         
         # schedule the function to run again after 100ms
         self.root.after(int(self.dt*1000), self.update_plots)

@@ -1,12 +1,6 @@
+from units import *  # noqa: F401,F403 - re-exported for notebooks
 import math
 
-mm_to_in = 0.03937008
-in_to_mm = 1.0 / mm_to_in
-mph_to_mps = 0.44704
-in_to_m = 0.0254
-ft_lbs_to_Nm = 1.0 / 1.355818
-oz_in_to_ft_lbs = 1.0 / 192.00000012288
-oz_in_to_Nm = 1.0 / 141.61193227806
 
 class DriveTrain:
     motor_rpm = 0.0
@@ -64,7 +58,7 @@ class DriveTrain:
         return self.driveshaft_rpm
     
     def calc_driveshaft_rpm_from_car_speed_mph(self, speed_mph):
-        self.speed_mps = speed_mph / mph_to_mps
+        self.speed_mps = speed_mph * mph_to_mps
         self.wheel_rpm = 60.0 * self.speed_mps / self.tire_circumference
         self.driveshaft_rpm = self.calc_driveshaft_rpm_from_wheel_rpm(self.wheel_rpm)
         return self.driveshaft_rpm

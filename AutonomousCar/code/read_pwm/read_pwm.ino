@@ -1,84 +1,104 @@
 /*
 Reading Values from an RC Receiver using Arduino
-Brandon Tsuge
-In this example, I demonstrate how to use Arduino to read RC (50Hz PWM) values using pulseIn() and external interrupts.
+Based on Brandon Tsuge's example:
 https://www.theboredrobot.com/post/reading-values-from-an-rc-receiver-using-arduino
- */
 
-//define the pins and variables
+Measures 50 Hz RC PWM pulse widths with pin-change interrupts and reports them over serial:
+  "PWM, 1, <throttle_us>, <steer_us>"  - a fresh pair of pulses
+  "PWM, 0, -1, -1"                     - no valid pulse on a channel for SIGNAL_TIMEOUT_MS
+*/
+
 #define ThrottlePin 2
 #define SteerPin 3
-volatile long ThrottleStartTime = 0;
-volatile long SteerStartTime = 0;
-volatile long ThrottleCurrentTime = 0;
-volatile long SteerCurrentTime = 0;
-volatile long ThrottlePulses = 0;
-volatile long SteerPulses = 0;
-int ThrottlePulseWidth = 0;
-int SteerPulseWidth = 0;
-bool newThrottle = false;
-bool newSteer = false;
-int err_cntr = 0;
+
+const unsigned long SIGNAL_TIMEOUT_MS = 100;   // ~5 missed frames at 50 Hz
+const unsigned long REPORT_PERIOD_MS = 50;     // 20 Hz output, same rate as before
+const unsigned long MIN_PULSE_US = 900;
+const unsigned long MAX_PULSE_US = 2100;
+
+// Written only inside the ISRs
+unsigned long ThrottleRiseTime = 0;
+unsigned long SteerRiseTime = 0;
+
+// Shared between ISRs and loop(): must be volatile
+volatile unsigned int ThrottlePulseWidth = 0;
+volatile unsigned int SteerPulseWidth = 0;
+volatile bool newThrottle = false;
+volatile bool newSteer = false;
+volatile unsigned long ThrottleLastValidMs = 0;
+volatile unsigned long SteerLastValidMs = 0;
+
+unsigned long lastReportMs = 0;
 
 void setup() {
-  //set up the serial monitor, pin mode, and external interrupt.
   Serial.begin(115200);
   pinMode(ThrottlePin, INPUT_PULLUP);
   pinMode(SteerPin, INPUT_PULLUP);
-  attachInterrupt(digitalPinToInterrupt(ThrottlePin),ThrottlePulseTimer,CHANGE);
-  attachInterrupt(digitalPinToInterrupt(SteerPin),SteerPulseTimer,CHANGE);
+  attachInterrupt(digitalPinToInterrupt(ThrottlePin), ThrottlePulseTimer, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(SteerPin), SteerPulseTimer, CHANGE);
 }
 
 void loop() {
-  if(newSteer && newThrottle){
-    Serial.print("PWM, 1, ");
-    Serial.print(ThrottlePulseWidth);
-    Serial.print(", ");
-    Serial.println(SteerPulseWidth);
-    newSteer = false;
-    newThrottle = false;
-    err_cntr = 0;
-    delay(50);
+  unsigned long now = millis();
+  if (now - lastReportMs < REPORT_PERIOD_MS) {
+    return;
   }
-  else{
-    err_cntr = err_cntr + 1;
-  }
+  lastReportMs = now;
 
-  if(err_cntr > 100){
+  // Copy shared values atomically (multi-byte reads can tear on 8-bit AVR boards)
+  noInterrupts();
+  unsigned int throttle = ThrottlePulseWidth;
+  unsigned int steer = SteerPulseWidth;
+  bool haveThrottle = newThrottle;
+  bool haveSteer = newSteer;
+  unsigned long throttleAge = now - ThrottleLastValidMs;
+  unsigned long steerAge = now - SteerLastValidMs;
+  interrupts();
+
+  if (throttleAge > SIGNAL_TIMEOUT_MS || steerAge > SIGNAL_TIMEOUT_MS) {
+    // real signal loss: no valid pulse recently. Keep looping (no blocking delay) so recovery is immediate.
     Serial.println("PWM, 0, -1, -1");
-    err_cntr = 0;
-    delay(1000);
+    return;
+  }
+
+  if (haveThrottle && haveSteer) {
+    noInterrupts();
+    newThrottle = false;
+    newSteer = false;
+    interrupts();
+
+    Serial.print("PWM, 1, ");
+    Serial.print(throttle);
+    Serial.print(", ");
+    Serial.println(steer);
   }
 }
 
-void ThrottlePulseTimer(){
-//  Serial.println("throttle in");
-  //measure the time between interrupts
-  ThrottleCurrentTime = micros();
-  long dt = ThrottleCurrentTime - ThrottleStartTime;
-//  Serial.print("Throttle dt: ");
-//  Serial.println(dt);
-  if (dt > 0){
-    if (dt >= 900 && dt <= 2100){
-      ThrottlePulseWidth = dt;
+// Time each high pulse by reading the pin level, rather than assuming edges alternate.
+void ThrottlePulseTimer() {
+  unsigned long t = micros();
+  if (digitalRead(ThrottlePin) == HIGH) {
+    ThrottleRiseTime = t;
+  } else {
+    unsigned long width = t - ThrottleRiseTime;  // unsigned math is correct across micros() rollover
+    if (width >= MIN_PULSE_US && width <= MAX_PULSE_US) {
+      ThrottlePulseWidth = (unsigned int)width;
       newThrottle = true;
+      ThrottleLastValidMs = millis();
     }
-    ThrottleStartTime = ThrottleCurrentTime;
   }
 }
 
-void SteerPulseTimer(){
-  //measure the time between interrupts
-  SteerCurrentTime = micros();
-  long dt = SteerCurrentTime - SteerStartTime;
-//  Serial.println(SteerCurrentTime);
-//  Serial.print("Steering dt: ");
-//  Serial.println(dt);
-  if (dt > 0){
-    if (dt >= 900 && dt <= 2100){
-      SteerPulseWidth = dt;
+void SteerPulseTimer() {
+  unsigned long t = micros();
+  if (digitalRead(SteerPin) == HIGH) {
+    SteerRiseTime = t;
+  } else {
+    unsigned long width = t - SteerRiseTime;
+    if (width >= MIN_PULSE_US && width <= MAX_PULSE_US) {
+      SteerPulseWidth = (unsigned int)width;
       newSteer = true;
+      SteerLastValidMs = millis();
     }
-    SteerStartTime = SteerCurrentTime;
   }
 }
