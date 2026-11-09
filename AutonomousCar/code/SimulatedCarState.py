@@ -6,7 +6,7 @@ def clamp(x, x_min, x_max):
     return min(x_max, max(x_min, x))
 
 class SimulatedCarState:
-    x = np.array([0, #0 - x position
+    x = np.array([0.0, #0 - x position
                   0, #1 - x speed
                   0, #2 - y position
                   0, #3 - y speed 
@@ -31,7 +31,8 @@ class SimulatedCarState:
     sri = 10
     
     def __init__(self, x, car_params):
-        self.x = x
+        # force float: an int array would silently truncate the steering rate / jerk commands
+        self.x = np.array(x, dtype=float)
         self.carParams = car_params
         
     
@@ -49,7 +50,7 @@ class SimulatedCarState:
         # ensure the desired acceleration is possible 
         u_accel = clamp(u_accel, self.carParams.max_braking_accel , self.carParams.max_forward_accel)
         # set the rate - will push to actual steering angle in update function
-        self.x[self.fji] = self.carParams.steer_damping * (u_accel - self.x[self.fai])
+        self.x[self.fji] = self.carParams.accel_damping * (u_accel - self.x[self.fai])
         
     def tic(self, dt):
         #

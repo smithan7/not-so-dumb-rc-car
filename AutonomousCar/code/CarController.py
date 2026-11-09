@@ -1,6 +1,9 @@
 from PID_Controller import PID
 
+
 class CarController:
-    speed_pid = PID()
-    steer_pid = PID()
-    crosstrack_pid = PID()
+    def __init__(self):
+        # per-instance controllers; class-level PIDs would share state between every CarController
+        self.speed_pid = PID()
+        self.steer_pid = PID()
+        self.crosstrack_pid = PID()

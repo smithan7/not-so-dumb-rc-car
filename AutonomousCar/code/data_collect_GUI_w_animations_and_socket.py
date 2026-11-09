@@ -1,4 +1,5 @@
 import tkinter as tk
+import tkinter.messagebox  # tk.messagebox is not loaded by 'import tkinter'
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 import numpy as np
@@ -174,8 +175,7 @@ class GUI:
         self.entry_canvas.itemconfig(self.cntrl_led, fill="green")  # Fill the circle with GREED
         
         self.entry_canvas.pack(side=tk.LEFT, fill=tk.BOTH)
-        self.update_plots()
-        tk.mainloop()
+        # polling + mainloop are started by run(); starting them here ran a second loop on a destroyed window
         
     
     def submit_data(self):
@@ -194,7 +194,7 @@ class GUI:
             print("steer_pwm: ", self.steer_pwm)
 
         
-        except:
+        except ValueError:
             tk.messagebox.showinfo('Error', "Your data was not formatted properly")  
         
         self.speed_entry.delete(0, tk.END)
@@ -205,10 +205,14 @@ class GUI:
         self.speed_pwm = 1500
 
     def animate(self, i):
-        if len(self.cmd_data[0]) < 5:
-            # print("N: ", len(self.cmd_data[0]))
-            return self.lines
-        
+        # command and nav packets arrive independently - draw whichever we have
+        if len(self.cmd_data[self.time_i]) >= 2:
+            self.animate_cmd()
+        if len(self.nav_data[self.time_i]) >= 2:
+            self.animate_nav()
+        return self.lines
+
+    def animate_cmd(self):
         # Speed PWM
         self.lines[0].set_xdata(self.cmd_data[self.time_i])
         self.lines[0].set_ydata(self.cmd_data[self.steve_speed_i])
@@ -222,8 +226,9 @@ class GUI:
         self.lines[2].set_ydata(self.cmd_data[self.steve_steer_i])
         self.lines[3].set_xdata(self.cmd_data[self.time_i])
         self.lines[3].set_ydata(self.cmd_data[self.xavier_steer_i])
-        self.axs[1].set_xlim(self.cmd_data[self.time_i][0], self.cmd_data[self.time_i][-1]+0.1)                
-        
+        self.axs[1].set_xlim(self.cmd_data[self.time_i][0], self.cmd_data[self.time_i][-1]+0.1)
+
+    def animate_nav(self):
         # Speed
         self.lines[4].set_xdata(self.nav_data[self.time_i])
         self.lines[4].set_ydata(self.nav_data[self.speed_i])
@@ -240,8 +245,8 @@ class GUI:
         # Odom
         self.lines[6].set_xdata(self.nav_data[self.odom_x_i])
         self.lines[6].set_ydata(self.nav_data[self.odom_y_i])
-        self.lines[7].set_xdata(self.nav_data[self.odom_x_i][-1])
-        self.lines[7].set_ydata(self.nav_data[self.odom_y_i][-1])
+        self.lines[7].set_xdata([self.nav_data[self.odom_x_i][-1]])
+        self.lines[7].set_ydata([self.nav_data[self.odom_y_i][-1]])
         
         mx = 0.75 * self.nav_data[self.odom_x_i][-1] + 0.25 * self.nav_data[self.odom_x_i][0]
         my = 0.75 * self.nav_data[self.odom_y_i][-1] + 0.25 * self.nav_data[self.odom_y_i][0]
@@ -251,10 +256,6 @@ class GUI:
         self.axs[4].set_ylim(my - 20.0, my+20.0)
         
         
-        # print("x: ", self.nav_data[self.odom_x_i])
-        # print("y: ", self.nav_data[self.odom_y_i])
-        
-        return self.lines
         
     # create a function to read the serial data and update the plots
     def update_plots(self):
@@ -271,6 +272,10 @@ class GUI:
                     break
                 else:
                     msg = msg.decode().split(",")
+                    expected = {'C': 11, 'N': 8}.get(msg[0])
+                    if expected is None or len(msg) < expected:
+                        print("ignoring malformed packet:", msg)
+                        continue
                     # print("msg: ", msg)
                     if msg[0] == 'C':
                         flag = True
@@ -292,7 +297,7 @@ class GUI:
                         self.steve_latency_label_var.set("Steve Latency: {:.1f} ms".format(np.mean(self.cmd_data[self.steve_latency_i])))
                         self.xavier_latency_label_var.set("Xavier Latency: {:.1f} ms".format(np.mean(self.cmd_data[self.xavier_latency_i])))
                         
-                        if msg[4] > 1500:
+                        if float(msg[4]) > 1500:
                             self.entry_canvas.itemconfig(self.cntrl_led, fill="green")
                         else:
                             self.entry_canvas.itemconfig(self.cntrl_led, fill="red")
@@ -313,8 +318,8 @@ class GUI:
                             while len(d) > 100:
                                 d.pop(0)
                 
-        except:
-            pass
+        except Exception as e:  # keep the GUI alive, but don't hide the problem
+            print("update_plots error:", repr(e))
         
         # schedule the function to run again after 100ms
         self.root.after(int(0.01 * 1000), self.update_plots)

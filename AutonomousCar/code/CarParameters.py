@@ -1,8 +1,5 @@
+from units import g, mph_to_mps, in_to_m, lbs_to_kg  # noqa: F401
 
-g = 9.81
-mph_to_mps = 0.44704
-in_to_m = 0.0254
-lbs_to_kg = 0.45359237
 
 class CarParam:
     max_steering_angle = 0.5435 # radians

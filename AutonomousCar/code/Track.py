@@ -4,9 +4,21 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 class Track:
-    def __init__(self, filename="../data/track_data.csv") :
+    def __init__(self, filename="../data/track_data.csv", closed=None):
         # pull in the track - default is laguna seca
         self.track_df = pd.read_csv(filename)
+        if closed is None:
+            # a closed circuit's last segment ends where the first one starts
+            closed = bool(np.hypot(self._b[-1, 0] - self._a[0, 0], self._b[-1, 1] - self._a[0, 1]) < 1e-6)
+        self.closed = closed
+
+    @property
+    def _a(self):
+        return self.track_df[["x", "y"]].to_numpy(dtype=float)
+
+    @property
+    def _b(self):
+        return self.track_df[["xn", "yn"]].to_numpy(dtype=float)
         
     def clamp(self, x, x_min, x_max):
         '''This ensures  x_min <= x <= x_max'''
@@ -61,26 +73,34 @@ class Track:
         return [p[0], p[1], np.linalg.norm(c -p), t]
         #return np.linalg.norm(c - (a + t*n)) #or np.linalg.norm(v - t*n)
     
+    def _nearest_on_segments(self, idx, p):
+        """Vectorized nearest_point_on_line_segment over the segments in idx. Returns (dist, t) arrays."""
+        a = self._a[idx]
+        n = self._b[idx] - a
+        v = np.asarray(p, dtype=float) - a
+        nn = np.einsum("ij,ij->i", n, n)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            t = np.where(nn > 0, np.einsum("ij,ij->i", v, n) / nn, 0.0)
+        t = np.clip(t, 0.0, 1.0)
+        d = np.linalg.norm(v - t[:, None] * n, axis=1)
+        return d, t
+
     def find_nearest_edge(self, p):
-        dists = np.array(self.track_df.apply(lambda x: self.nearest_point_on_line_segment([x["x"], x["y"]], [x["xn"], x["yn"]], p), axis=1).to_list())
-        # print("dists: ", dists)
-        
-        mindex = np.argmin(dists[:,2])
-        mindist = dists[mindex, 2]
-        mint = dists[mindex, 3]
-        return mindex, mindist, mint
-    
+        idx = np.arange(len(self._a))
+        d, t = self._nearest_on_segments(idx, p)
+        k = int(np.argmin(d))
+        return k, d[k], t[k]
+
     def find_nearest_edge_with_seed(self, p, i, window_size=5):
-        cnt = min(i+window_size, len(self.track_df))
-        
-        dists = np.array(self.track_df[i:cnt].apply(lambda x: self.nearest_point_on_line_segment([x["x"], x["y"]], [x["xn"], x["yn"]], p), axis=1).to_list())
-        # print(dists)
-        mindex = np.argmin(dists[:,2])
-        
-        # print(dists[mindex,:])
-        mindist = dists[mindex, 2]
-        mint = dists[mindex, 3]
-        return mindex+i, mindist, mint
+        """Search window_size segments starting at i; wraps past the start/finish line on a closed track."""
+        n = len(self._a)
+        if self.closed:
+            idx = (i + np.arange(min(window_size, n))) % n
+        else:
+            idx = np.arange(i, min(i + window_size, n))
+        d, t = self._nearest_on_segments(idx, p)
+        k = int(np.argmin(d))
+        return int(idx[k]), d[k], t[k]
     
     def find_cross_track_error_to_segment(self, A, B, C):
         # Find if point C is left right of line AB
@@ -144,8 +164,14 @@ class Track:
         z1 = 0 + 0j
         z2 = 0 + 0j
         z3 = 0 + 0j
+        n = len(self.track_df)
+        if self.closed and n > 2:
+            # on a circuit every point has neighbours on both sides
+            z1 = complex(self.track_df['x'][(si-1) % n], self.track_df['y'][(si-1) % n])
+            z2 = complex(self.track_df['x'][si], self.track_df['y'][si])
+            z3 = complex(self.track_df['x'][(si+1) % n], self.track_df['y'][(si+1) % n])
         # verify I am a middle point
-        if si > 0 and si < len(self.track_df)-1:
+        elif si > 0 and si < len(self.track_df)-1:
             # z1 = previous segment
             z1 = complex(self.track_df['x'][si-1], self.track_df['y'][si-1])
             # z2 = current segment
@@ -205,27 +231,37 @@ class Track:
         self.track_df['speed limit'] = self.track_df.apply(lambda x: min(carParams.max_speed, math.sqrt(x['roc'] * carParams.max_centripetal_accel)), axis=1)
     
     def back_propagate_speed_limits_to_set_speed(self, carParam):
-        # start at edge 0 and go to end - 1
+        """Turn per-segment corner limits into a drivable speed profile.
+
+        Backward pass: you must be able to brake (max_braking_accel) down to every later limit.
+        Forward pass: you can only gain speed at max_forward_accel.
+        On a closed track both passes wrap around the start/finish line until nothing changes.
+        """
         spds = self.track_df['speed limit'].to_list()
-        flag = True
-        cntr = 0
-        while flag and cntr < 100:
-            cntr += 1
-            if cntr > 99:
-                print("Track::back_propagate_speed_limits_to_set_speed: Failed to converge")
-                return
-            flag = False
-            for i in range(len(spds) - 1):
-                vi = spds[i+1]
-                d = self.track_df['dist'][i]
-                vf = math.sqrt(vi**2 - 2.0*carParam.max_braking_accel*d)
-                if vf < spds[i]:
-                    spds[i] = vf
-                    flag = True
+        dists = self.track_df['dist'].to_list()
+        n = len(spds)
+        a_brake = abs(carParam.max_braking_accel)
+        a_fwd = abs(carParam.max_forward_accel)
+        # segment i runs from point i to point i+1; the last one only connects back on a closed track
+        segs = range(n) if self.closed else range(n - 1)
+
+        for _ in range(100):
+            changed = False
+            for i in reversed(segs):  # backward: braking
+                j = (i + 1) % n
+                v = math.sqrt(spds[j]**2 + 2.0*a_brake*dists[i])
+                if v < spds[i] - 1e-9:
+                    spds[i] = v
+                    changed = True
+            for i in segs:  # forward: acceleration
+                j = (i + 1) % n
+                v = math.sqrt(spds[i]**2 + 2.0*a_fwd*dists[i])
+                if v < spds[j] - 1e-9:
+                    spds[j] = v
+                    changed = True
+            if not changed:
+                break
+        else:
+            print("Track::back_propagate_speed_limits_to_set_speed: Failed to converge")
+            return
         self.track_df['speed'] = spds
-        
-    def computeCentripetalAcceleration(self, speed):
-        return pow(speed,2) / self.radius_of_curvature
-    
-    def computeLinearAcceleration(self, s0, s1):
-        return (s1**2 - s0**2) / (2.0 * self.length_m)

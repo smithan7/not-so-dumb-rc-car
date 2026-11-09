@@ -1,4 +1,5 @@
 import tkinter as tk
+import tkinter.messagebox  # tk.messagebox is not loaded by 'import tkinter'
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 import serial
@@ -145,7 +146,7 @@ class GUI:
             print("steer_pwm: ", self.steer_pwm)
 
         
-        except:
+        except ValueError:
             tk.messagebox.showinfo('Error', "Your data was not formatted properly")  
         
         self.speed_entry.delete(0, tk.END)
@@ -170,6 +171,10 @@ class GUI:
                     break
                 else:
                     msg = msg.decode().split(",")
+                    expected = {'C': 11, 'N': 8}.get(msg[0])
+                    if expected is None or len(msg) < expected:
+                        print("ignoring malformed packet:", msg)
+                        continue
                     # print("msg: ", msg)
                     if msg[0] == 'C':
                         flag = True
@@ -191,7 +196,7 @@ class GUI:
                         self.steve_latency_label_var.set("Steve Latency: {:.1f}".format(np.mean(self.cmd_data[self.steve_latency_i])))
                         self.xavier_latency_label_var.set("Xavier Latency: {:.1f}".format(np.mean(self.cmd_data[self.xavier_latency_i])))
                         
-                        if msg[4] > 1500:
+                        if float(msg[4]) > 1500:
                             self.entry_canvas.itemconfig(self.cntrl_led, fill="green")
                         else:
                             self.entry_canvas.itemconfig(self.cntrl_led, fill="red")
@@ -288,8 +293,8 @@ class GUI:
                     
                 self.root.update()
                 
-        except:
-            pass
+        except Exception as e:  # keep the GUI alive, but don't hide the problem
+            print("update_plots error:", repr(e))
         
         # schedule the function to run again after 100ms
         self.root.after(int(0.01 * 1000), self.update_plots)
