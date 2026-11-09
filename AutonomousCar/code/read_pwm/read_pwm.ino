@@ -4,8 +4,9 @@ Based on Brandon Tsuge's example:
 https://www.theboredrobot.com/post/reading-values-from-an-rc-receiver-using-arduino
 
 Measures 50 Hz RC PWM pulse widths with pin-change interrupts and reports them over serial:
-  "PWM, 1, <throttle_us>, <steer_us>"  - a fresh pair of pulses
-  "PWM, 0, -1, -1"                     - no valid pulse on a channel for SIGNAL_TIMEOUT_MS
+  "PWM, 1, <throttle_us>, <steer_us>, <millis>"  - a fresh pair of pulses
+  "PWM, 0, -1, -1, <millis>"                     - no valid pulse on a channel for SIGNAL_TIMEOUT_MS
+The trailing millis() lets the PC logger (sysid_logger.py) re-time lines that arrive late.
 */
 
 #define ThrottlePin 2
@@ -57,7 +58,8 @@ void loop() {
 
   if (throttleAge > SIGNAL_TIMEOUT_MS || steerAge > SIGNAL_TIMEOUT_MS) {
     // real signal loss: no valid pulse recently. Keep looping (no blocking delay) so recovery is immediate.
-    Serial.println("PWM, 0, -1, -1");
+    Serial.print("PWM, 0, -1, -1, ");
+    Serial.println(now);
     return;
   }
 
@@ -70,7 +72,9 @@ void loop() {
     Serial.print("PWM, 1, ");
     Serial.print(throttle);
     Serial.print(", ");
-    Serial.println(steer);
+    Serial.print(steer);
+    Serial.print(", ");
+    Serial.println(now);
   }
 }
 

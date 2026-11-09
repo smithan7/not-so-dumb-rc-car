@@ -30,6 +30,27 @@ pip install -r requirements.txt
 
 Notebooks import the modules directly, so start Jupyter from `AutonomousCar/code/`.
 
+## Logging for system ID
+
+```sh
+cd AutonomousCar/code
+python sysid_logger.py --duration 300 --notes "throttle steps, parking lot"   # auto-detects OLA/GPS/PWM ports
+python sysid_logger.py --port ola=/dev/tty.usbmodem1101 --port pwm=/dev/tty.usbserial-0001
+```
+
+Each run writes `AutonomousCar/logs/session_<time>/` with one raw CSV per serial stream and `meta.json`.
+Load and time-align it in a notebook:
+
+```python
+from sysid_log import load_session, summarize, ola_to_si
+s = load_session("../logs/session_20261108_120000")
+print(summarize(s))          # rates, gaps, and per-stream latency; flags a logger that fell behind
+imu = ola_to_si(s["ola"])    # m/s^2 and rad/s; accel range auto-detected, gyro range must match OLA config
+s["pwm"], s["gps"]           # all share one time column, "t" (s since session start)
+```
+
+`load_legacy_pickles()` re-times the 2023 `*_data.pkl` logs the same way.
+
 ## Tests
 
 ```sh
