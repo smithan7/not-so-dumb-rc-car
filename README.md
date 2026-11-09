@@ -51,6 +51,17 @@ s["pwm"], s["gps"]           # all share one time column, "t" (s since session s
 
 `load_legacy_pickles()` re-times the 2023 `*_data.pkl` logs the same way.
 
+## System ID model and test plan
+
+- `sysid_model.py`: grey-box model driven by raw PWM (servo + ESC in front of the bicycle model)
+  and `fit_longitudinal` / `fit_lateral` (scipy least squares, with 1-sigma and correlations).
+- `sysid_maneuvers.py`: the test passes (`longitudinal_passes`, `lateral_passes`), checked against the
+  test area with `check_fits_area`, plus synthetic sensors to rehearse fits.
+- `python sysid_identifiability.py`: Monte Carlo study of how well each parameter is pinned down
+  by the designed passes vs. manual driving, with encoder vs. GPS-only speed.
+
+Measure the wheelbase and set `sysid_model.WHEELBASE_M`: yaw rate only identifies steer_gain / wheelbase.
+
 ## Tests
 
 ```sh
