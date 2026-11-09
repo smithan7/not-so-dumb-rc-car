@@ -154,6 +154,8 @@ class MPPI:
         self.lo = np.array([thr_limits[0], self.p["steer_center_us"] - st_span])
         self.hi = np.array([thr_limits[1], self.p["steer_center_us"] + st_span])
         self.half_width = course.width / 2 - car_half_width
+        self.min_half_width = 0.25
+        self.v_cap = v_max
         self.unc = param_uncertainty
         self.use_state_cov, self.z_sigma = use_state_cov, z_sigma
         self.M = scenarios if (use_state_cov or param_uncertainty is not None) else 1
@@ -201,7 +203,7 @@ class MPPI:
         s, _ = self.course.project(x_pred[0], x_pred[1])
         _, _, _, n = self.course.at(s)
         sig_e = math.sqrt(max(n @ P[np.ix_([IX, IY], [IX, IY])] @ n, 0.0))
-        return max(self.half_width - self.z_sigma * sig_e, 0.25)
+        return max(self.half_width - self.z_sigma * sig_e, self.min_half_width)
 
     def rollout_costs(self, X0, U_samp, p, half):
         K, H = U_samp.shape[:2]
@@ -218,7 +220,7 @@ class MPPI:
             excess = np.maximum(np.abs(e) - half, 0.0)
             cost += self.w["track"] * ((excess > 0) + 5.0 * excess)
             alat = np.maximum(np.abs(x[:, 3] * r) - self.a_lat_max, 0.0)
-            cost += self.w["alat"] * alat ** 2 + 50.0 * np.maximum(x[:, 3] - self.v_max, 0.0)
+            cost += self.w["alat"] * alat ** 2 + 50.0 * np.maximum(x[:, 3] - self.v_cap, 0.0)
             traj[:, h] = x[:, :2]
         du = np.diff(U_samp, axis=1) / 100.0
         cost += self.w["smooth"] * np.sum(du ** 2, axis=(1, 2))
@@ -236,6 +238,9 @@ class MPPI:
         K, Mc = self.K, self.M
         # rollout k*M + m = control sample k under scenario m
         p_t = {k: (np.tile(v, K) if np.ndim(v) else v) for k, v in p.items()}
+        # graceful degradation: when the margin eats most of the track the estimate is too poor
+        # to race on - cap speed in proportion instead of squeezing the path to nothing
+        self.v_cap = self.v_max * float(np.clip(half / (0.5 * self.half_width), 0.35, 1.0))
         c_all, traj = self.rollout_costs(np.tile(X0, (K, 1)), np.repeat(U_samp, Mc, axis=0), p_t, half)
         c_all = c_all.reshape(K, Mc)
         # risk-aware aggregate: blend of the mean and the worst scenario

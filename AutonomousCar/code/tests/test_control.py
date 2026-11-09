@@ -143,3 +143,35 @@ def test_ukf_survives_gyro_and_encoder_dropout():
     for k in range(1, 600):  # 60 s of GPS only
         ukf.update(k * 0.1, "gps", np.zeros(2))
     assert np.all(np.isfinite(ukf.z)) and np.all(np.isfinite(ukf.P))
+
+
+def test_lateral_measurement_observes_cross_track_despite_gps_bias(course):
+    """Parked on the centerline with a 0.6 m GPS bias: the L515-style lateral offset pins e."""
+    (x0, y0), psi0 = course.xy[0], course.psi[0]
+    n = course.normal[0]
+    fn = lambda X, Y: course.project(X, Y)[1]
+    a = initial_ukf(x0, y0, psi0, 0.0, gps_bias_sd=0.5, r_gps=0.3)
+    b = initial_ukf(x0, y0, psi0, 0.0, gps_bias_sd=0.5, r_gps=0.3, r_lateral=0.1, lateral_fn=fn)
+    biased = np.array([x0, y0]) + 0.6 * n
+    for k in range(1, 300):
+        t = k * 0.05
+        for f in (a, b):
+            f.update(t, "gyro", 0.0)
+            f.update(t, "enc", 0.0)
+            if k % 2 == 0:
+                f.update(t, "gps", biased)
+        b.update(t, "lateral", 0.0)
+    _, e_a = course.project(a.z[IX], a.z[IY])
+    _, e_b = course.project(b.z[IX], b.z[IY])
+    sig = lambda f: math.sqrt(n @ f.P[np.ix_([IX, IY], [IX, IY])] @ n)
+    assert abs(e_b) < 0.1 < abs(e_a)
+    assert sig(b) < 0.5 * sig(a)
+
+
+def test_gps_fix_mode_change_resets_bias_state():
+    ukf = initial_ukf(0, 0, 0, 0.0, gps_bias_sd=0.03, r_gps=0.03)
+    for k in range(1, 50):
+        ukf.update(k * 0.1, "gps", (np.zeros(2), 0.03, 0.03))  # RTK fixed
+    ukf.update(5.0, "gps", (np.array([0.5, 0.0]), 0.3, 0.4))   # drops to float, jumps 0.5 m
+    assert math.sqrt(ukf.P[6, 6]) > 0.2          # bias spread now float-sized (was 0.03)
+    assert abs(ukf.z[IX]) < 0.1                   # the jump is blamed on the bias, not the car

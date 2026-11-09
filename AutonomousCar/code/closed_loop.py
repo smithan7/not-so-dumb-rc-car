@@ -38,6 +38,10 @@ CAR_HALF_WIDTH = 0.2
 GPS_GOOD = {"rate_hz": 10.0, "lag_s": 0.2, "noise": 0.5, "bias_sd": 0.3, "bias_tau_s": 30.0}
 GPS_BAD = {"rate_hz": 10.0, "lag_s": 0.2, "noise": 1.0, "bias_sd": 0.6, "bias_tau_s": 30.0}
 GPS_RTK = {"rate_hz": 10.0, "lag_s": 0.1, "noise": 0.03, "bias_sd": 0.03, "bias_tau_s": 30.0}  # RTK fixed
+# RTK that drops to float for 8 s every 25 s (buildings, trees, parked cars); the receiver reports it
+GPS_RTK_OUTAGE = dict(GPS_RTK, float={"first_s": 12.0, "every_s": 25.0, "duration_s": 8.0, "noise": 0.3,
+                                      "bias_sd": 0.4, "bias_tau_s": 10.0})
+L515 = {"rate_hz": 15.0, "lag_s": 0.07, "noise": 0.10, "p_valid": 0.7}
 
 
 def make_plant(kind, params):
@@ -47,12 +51,15 @@ def make_plant(kind, params):
 class Sensors:
     """Gyro, encoder and lagged GPS sampled from a plant, as the logger would see them."""
 
-    def __init__(self, p_true, gps, rng):
-        self.p, self.gps, self.rng = p_true, gps, rng
-        self.next = {"gyro": 0.0, "enc": 0.0, "gps": 0.0}
+    def __init__(self, p_true, gps, rng, course=None):
+        self.p, self.gps, self.rng, self.course = p_true, gps, rng, course
+        self.lat = gps.get("lateral")
+        self.next = {"gyro": 0.0, "enc": 0.0, "gps": 0.0, "lateral": 0.0}
         self.period = {"gyro": 1 / D.SENSORS["gyro"]["rate_hz"], "enc": 1 / D.SENSORS["encoder"]["rate_hz"],
                        "gps": 1 / gps["rate_hz"]}
         self.bias = gps["bias_sd"] * rng.standard_normal(2)  # stationary from the start
+        f = gps.get("float")
+        self.float_bias = f["bias_sd"] * rng.standard_normal(2) if f else np.zeros(2)
         self.pending = []  # (arrival_t, fix_t, xy)
 
     def poll(self, t, plant):
@@ -72,10 +79,27 @@ class Sensors:
             self.bias = a * self.bias + g["bias_sd"] * math.sqrt(1 - a * a) * self.rng.standard_normal(2)
             self.next["gps"] += dt
             xy = plant.state[:2] + self.bias + self.rng.normal(0, g["noise"], 2)
-            self.pending.append((t + g["lag_s"], t, xy))
+            sd, bias_sd = g["noise"], g["bias_sd"]
+            f = g.get("float")
+            if f:
+                af = math.exp(-dt / f["bias_tau_s"])
+                self.float_bias = af * self.float_bias + f["bias_sd"] * math.sqrt(1 - af * af) * self.rng.standard_normal(2)
+                if t >= f["first_s"] and (t - f["first_s"]) % f["every_s"] < f["duration_s"]:
+                    xy = xy + self.float_bias + self.rng.normal(0, f["noise"], 2)
+                    sd, bias_sd = f["noise"], f["bias_sd"]  # from the receiver's fix type / accuracy fields
+            self.pending.append((t + g["lag_s"], t, (xy, sd, bias_sd)))
+        if self.lat and t >= self.next["lateral"]:
+            self.next["lateral"] += 1 / self.lat["rate_hz"]
+            if self.rng.random() < self.lat["p_valid"]:  # cones in view and detected
+                _, e = self.course.project(*plant.state[:2])
+                self.pending.append((t + self.lat["lag_s"], t, ("lateral", float(e) + self.rng.normal(0, self.lat["noise"]))))
+        self.pending.sort(key=lambda m: m[0])
         while self.pending and self.pending[0][0] <= t:
-            _, t_fix, xy = self.pending.pop(0)
-            out.append((t_fix, "gps", xy))
+            _, t_fix, val = self.pending.pop(0)
+            if isinstance(val, tuple) and isinstance(val[0], str):
+                out.append((t_fix, val[0], val[1]))
+            else:
+                out.append((t_fix, "gps", val))
         return out
 
 
@@ -157,8 +181,11 @@ def drive(controller, course, kind, p_true, gps, duration_s=40.0, laps=3, seed=1
     (x0, y0), psi0 = course.xy[0], course.psi[0]
     plant.reset(x0, y0, psi0)
     # the filter is told the receiver spec (noise, bias spread, wander time) - not the realised bias
-    ukf = initial_ukf(x0, y0, psi0, r_gps=gps["noise"], gps_bias_sd=gps["bias_sd"], gps_bias_tau=gps["bias_tau_s"])
-    sensors = Sensors(p_true, gps, rng)
+    lat = gps.get("lateral")
+    ukf = initial_ukf(x0, y0, psi0, r_gps=gps["noise"], gps_bias_sd=gps["bias_sd"], gps_bias_tau=gps["bias_tau_s"],
+                      r_lateral=lat["noise"] if lat else 0.1,
+                      lateral_fn=(lambda X, Y: course.project(X, Y)[1]) if lat else None)
+    sensors = Sensors(p_true, gps, rng, course)
     sent = [(-1.0, 1500.0, 1500.0)]
     delay = p_true["input_delay"]
     ctrl_period, next_ctrl = 1.0 / control_hz, 0.0
@@ -215,7 +242,11 @@ def drive(controller, course, kind, p_true, gps, duration_s=40.0, laps=3, seed=1
 
 
 SCENARIOS = {"nominal": ("kinematic", GPS_GOOD), "dynamic": ("dynamic", GPS_GOOD),
-             "dynamic_badgps": ("dynamic", GPS_BAD), "dynamic_rtk": ("dynamic", GPS_RTK)}
+             "dynamic_badgps": ("dynamic", GPS_BAD), "dynamic_rtk": ("dynamic", GPS_RTK),
+             "dynamic_lidar": ("dynamic", dict(GPS_GOOD, lateral=L515)),
+             "dynamic_rtk_lidar": ("dynamic", dict(GPS_RTK, lateral=L515)),
+             "dynamic_rtk_outage": ("dynamic", GPS_RTK_OUTAGE),
+             "dynamic_rtk_outage_lidar": ("dynamic", dict(GPS_RTK_OUTAGE, lateral=L515))}
 DEFAULT_CONTROLLERS = ["pure_pursuit", "mppi", "mppi_ukf"]
 
 
