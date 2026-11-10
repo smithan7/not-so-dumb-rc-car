@@ -19,6 +19,23 @@ Hardware plan: RTK GPS + Intel RealSense L515 on the Xavier.
 - **The UKF uses the receiver's reported fix type.** When the mode changes (fixed ↔ float), it
   resets its GPS-bias state to that mode's spread.
 
+### Cone plan: brightly coloured cones on black asphalt
+- **Detect in the L515's RGB stream, then range.** Bright cones on black asphalt are close to
+  ideal for a hue/saturation threshold, and that works in full sun. Use a short manual exposure
+  against motion blur. Range comes from L515 depth on the cone pixels when it returns.
+  Otherwise, project the cone's base pixel onto the ground plane: the lot is flat and the
+  camera height and pitch are fixed. This means sunlight washing out the depth (black asphalt
+  returns little IR anyway) degrades accuracy but does not kill the sensor.
+- **Two colours, one per side** (e.g. left orange, right yellow). Left versus right then never
+  depends on the position estimate.
+- **Survey every cone with the RTK rover** to make a cone map. A detection then becomes a
+  range/bearing landmark measurement against a mapped cone. That corrects along-track position
+  and heading as well as lateral offset, which is better than the lateral-only measurement
+  rehearsed in sim. Data association is easy: nearest same-colour mapped cone, with an
+  innovation gate. The gate also rejects cones that got knocked over.
+- Spacing: about 3–4 m per side on straights and tighter in corners (about 50–60 cones for the
+  92 m loop). Use tall cones (≥ 30 cm), not flat discs, so they show above the asphalt at 3–8 m.
+
 ## The UKF ↔ MPPI pairing (chosen design, "level 1")
 
 1. **UKF**: gyro + encoder + GPS (lagged fixes applied at their fix time by rollback/replay) +
@@ -106,10 +123,12 @@ Run the designed passes (`sysid_maneuvers.py`) with `sysid_logger.py`, then fit.
 ### Stage 1: estimator on the car → gate B (before anything drives itself)
 - [ ] RTK: fixed for ≥ 90% of a lap around the lot. The fix type (GGA quality 4/5) and the
       accuracy fields are logged and fed to the UKF (mode-change bias reset).
-- [ ] L515 outdoors in the lot, at the time of day you drive: cones (or the track edge) detected
-      at ≥ 3 m in ≥ 30% of frames, with lateral offset error ≤ 0.2 m against a tape measure.
-      If sunlight kills it, test the L515's RGB stream for cone detection instead (a colour
-      threshold on orange cones), or run at dusk or on an overcast day.
+- [ ] Cones on the asphalt, at the time of day you drive. RGB colour detection: ≥ 95% of cones
+      within 3–8 m detected, colour (side) right ≥ 99%, and no false detections in shadows or on
+      paint lines. Range error ≤ 0.2 m at 3 m and ≤ 0.4 m at 6 m against a tape measure. Record
+      both the L515 depth and the ground-plane range, and note how often depth returns in sun.
+      At least one cone in view in ≥ 30% of frames around the lap.
+- [ ] Cone map: every cone surveyed with the RTK rover (fixed). Re-survey after any cone is hit.
 - [ ] Extrinsics: L515 pose on the car measured (lever arm and yaw). A 1° yaw error is 5 cm
       at 3 m.
 - [ ] UKF replayed offline on a hand-driven log: GPS innovation NIS mean between 1.5 and 3
