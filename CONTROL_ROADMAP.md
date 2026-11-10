@@ -33,8 +33,12 @@ Hardware plan: RTK GPS + Intel RealSense L515 on the Xavier.
   and heading as well as lateral offset, which is better than the lateral-only measurement
   rehearsed in sim. Data association is easy: nearest same-colour mapped cone, with an
   innovation gate. The gate also rejects cones that got knocked over.
-- Spacing: about 3–4 m per side on straights and tighter in corners (about 50–60 cones for the
-  92 m loop). Use tall cones (≥ 30 cm), not flat discs, so they show above the asphalt at 3–8 m.
+- Spacing target: about 3–4 m per side on straights and tighter in corners (about 50–60 cones
+  for the 92 m loop). Placement will be approximate. That is fine because **the survey is the
+  truth**: the cone map, not the designed spline, defines the track edges the planner uses, and
+  the course is rebuilt from it. Check the surveyed map for gaps; a gap > 6 m on one side
+  means no landmarks there, so add a cone. Use tall cones (≥ 30 cm), not flat discs, so they
+  show above the asphalt at 3–8 m.
 
 ## The UKF ↔ MPPI pairing (chosen design, "level 1")
 
