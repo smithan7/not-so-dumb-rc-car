@@ -119,7 +119,7 @@ Run the designed passes (`sysid_maneuvers.py`) with `sysid_logger.py`, then fit.
       (`esp32_autopilot_interface`, timestamp echo + failsafe) with the matching `esp32_node`
       from ROS_nsd_rc_car. Bench: transmitter off in MANUAL and AUTO → failsafe, never AUTO;
       failsafe brake (1400 µs) brakes, not reverses. AVC off, ESC drag brake 0. Optical
-      driveshaft encoder: edges per driveshaft rev (disc segments) and per wheel rev measured,
+      driveshaft encoder: 2 edges per driveshaft rev confirmed by hand, edges per wheel rev measured,
       counts checked in sunlight.
 - [ ] Fits converge with no |correlation| > 0.95. 1σ < 5% for every gain and time constant,
       steer center ±2 µs, input delay ±10 ms.

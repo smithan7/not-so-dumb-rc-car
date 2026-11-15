@@ -32,9 +32,9 @@ BENCH CHECKS before driving (wheels off the ground):
     low on signal loss, the ESP32 cannot tell - set the receiver failsafe so it does not.
   - pins / channels below, and that brake_us (failsafe.h) brakes rather than reverses.
   - encoder: turn the driveshaft one revolution SLOWLY by hand - enc_count must rise by exactly
-    the number of reflective segments on the disc (set esp32_node ~encoder_edges_per_rev to
-    it). Slow edges are where a comparator without hysteresis chatters; extra counts here
-    mean the debounce (ENC_MIN_DT_US) or the sensor's threshold pot needs adjusting.
+    2 (disc = 4 quarter segments, 2 blocked + 2 open; esp32_node ~encoder_edges_per_rev = 2).
+    Slow edges are where a comparator without hysteresis chatters; extra counts here mean the
+    debounce (ENC_MIN_DT_US) or the sensor's threshold pot needs adjusting.
   - encoder outdoors: reflective IR sensors can be blinded by sunlight. Spin the wheels in
     the lot, in sun, and check counts against the indoor run; shroud the sensor if they drop.
 */
@@ -44,7 +44,9 @@ BENCH CHECKS before driving (wheels off the ground):
 #include "failsafe.h"
 
 // ---- wiring (unchanged from the original sketch) ----
-#define ENCODER_PIN 21  // reflective optical sensor on a segmented driveshaft disc (rising edges)
+#define ENCODER_PIN 21  // optical sensor on the driveshaft disc: 2 blocked + 2 open quarters
+                        // = 2 rising edges per rev (rising-to-rising spans one blocked+open pair,
+                        // so unequal blocked/open widths don't matter)
 #define SpeedPinIn 19
 #define SteerPinIn 18
 #define CmdPinIn 17  // receiver ch3: > 1500 us = human has control
@@ -57,8 +59,8 @@ const int SERVO_HZ = 50;                    // output frame rate (receiver itsel
 const uint32_t PWM_FRAME_US = 5550;         // receiver frame period (new receiver)
 const uint32_t PWM_FRAME_TOL_US = 100;
 const uint32_t PULSE_MIN_US = 900, PULSE_MAX_US = 2100;
-// Debounce: rising edges closer than this are noise. 300 us = 3300 edges/s, i.e. room for
-// ~10 segments at ~20000 driveshaft rpm. Lower it if the disc has many segments.
+// Debounce: rising edges closer than this are noise. 300 us = 3300 edges/s = 100000
+// driveshaft rpm at 2 edges/rev - far above anything the car can do.
 const uint32_t ENC_MIN_DT_US = 300;
 
 car::Config cfg;
