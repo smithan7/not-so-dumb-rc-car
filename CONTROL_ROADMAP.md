@@ -115,7 +115,11 @@ Even a weak measurement helps. Target **≤ 0.2 m at ≥ 30% of frames, ≥ 10 H
 
 Run the designed passes (`sysid_maneuvers.py`) with `sysid_logger.py`, then fit.
 - [ ] Wheelbase measured (axle to axle) and set in `sysid_model.WHEELBASE_M`. Throttle/steer
-      PWM channels confirmed. OLA set to ±16 g. `read_pwm.ino` flashed (millis stamps).
+      PWM channels confirmed. OLA set to ±16 g. ESP32 firmware v2 flashed
+      (`esp32_autopilot_interface`, timestamp echo + failsafe) with the matching `esp32_node`
+      from ROS_nsd_rc_car. Bench: transmitter off in MANUAL and AUTO → failsafe, never AUTO;
+      failsafe brake (1400 µs) brakes, not reverses. AVC off, ESC drag brake 0. Driveshaft
+      pulses per wheel revolution measured.
 - [ ] Fits converge with no |correlation| > 0.95. 1σ < 5% for every gain and time constant,
       steer center ±2 µs, input delay ±10 ms.
 - [ ] **Hold-out check**: refit with one pass of each kind left out and predict that pass. Speed
