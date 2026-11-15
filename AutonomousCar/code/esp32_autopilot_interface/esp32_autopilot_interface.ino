@@ -1,6 +1,6 @@
 /*
 ESP32 autopilot interface: car-side firmware between the RC receiver ("Steve"), the Jetson
-Xavier NX ("Xavier"), the steering servo / ESC, and the driveshaft hall sensor.
+Xavier NX ("Xavier"), the steering servo / ESC, and the driveshaft optical encoder.
 Host side: smithan7/ROS_nsd_rc_car catkin_ws/src/esp32_interface/scripts/esp32_node.py
 (protocol v2 - needs the matching esp32_node / esp32_protocol.py).
 
@@ -14,8 +14,8 @@ Protocol v2, SERIAL_BAUD
   ESP32 -> Jetson, every STATUS_PERIOD_MS:
                     S,<now_us>,<mode>,<armed>,<rc_age_ms>,<jetson_age_ms>,<rc_ch3_us>,
                       <rc_speed_us>,<rc_steer_us>,<jetson_seq>,<jetson_speed_us>,
-                      <jetson_steer_us>,<out_speed_us>,<out_steer_us>,<hall_count>,
-                      <hall_last_edge_us>,<hall_dt_us>,<bad_cmds>,$
+                      <jetson_steer_us>,<out_speed_us>,<out_steer_us>,<enc_count>,
+                      <enc_last_edge_us>,<enc_dt_us>,<bad_cmds>,$
   *_us times are this ESP32's micros() (wraps every ~71.6 min); ages are -1 if never seen.
   out_* is what is written to the servo/ESC (after clamping/failsafe); it reaches the
   actuators at their next PWM frame (0-20 ms at SERVO_HZ = 50).
@@ -31,6 +31,12 @@ BENCH CHECKS before driving (wheels off the ground):
     -2/-3) and the throttle to neutral/brake. If the receiver keeps outputting pulses with ch3
     low on signal loss, the ESP32 cannot tell - set the receiver failsafe so it does not.
   - pins / channels below, and that brake_us (failsafe.h) brakes rather than reverses.
+  - encoder: turn the driveshaft one revolution SLOWLY by hand - enc_count must rise by exactly
+    the number of reflective segments on the disc (set esp32_node ~encoder_edges_per_rev to
+    it). Slow edges are where a comparator without hysteresis chatters; extra counts here
+    mean the debounce (ENC_MIN_DT_US) or the sensor's threshold pot needs adjusting.
+  - encoder outdoors: reflective IR sensors can be blinded by sunlight. Spin the wheels in
+    the lot, in sun, and check counts against the indoor run; shroud the sensor if they drop.
 */
 
 #include <ESP32Servo.h>
@@ -38,7 +44,7 @@ BENCH CHECKS before driving (wheels off the ground):
 #include "failsafe.h"
 
 // ---- wiring (unchanged from the original sketch) ----
-#define HE_Sensor_Pin 21
+#define ENCODER_PIN 21  // reflective optical sensor on a segmented driveshaft disc (rising edges)
 #define SpeedPinIn 19
 #define SteerPinIn 18
 #define CmdPinIn 17  // receiver ch3: > 1500 us = human has control
@@ -51,7 +57,9 @@ const int SERVO_HZ = 50;                    // output frame rate (receiver itsel
 const uint32_t PWM_FRAME_US = 5550;         // receiver frame period (new receiver)
 const uint32_t PWM_FRAME_TOL_US = 100;
 const uint32_t PULSE_MIN_US = 900, PULSE_MAX_US = 2100;
-const uint32_t HALL_MIN_DT_US = 300;        // debounce: faster than ~3300 driveshaft rev/s is noise
+// Debounce: rising edges closer than this are noise. 300 us = 3300 edges/s, i.e. room for
+// ~10 segments at ~20000 driveshaft rpm. Lower it if the disc has many segments.
+const uint32_t ENC_MIN_DT_US = 300;
 
 car::Config cfg;
 car::Arbiter arbiter(cfg);
@@ -73,10 +81,10 @@ volatile PulseChannel ch_speed = {SpeedPinIn, 0, false, 1500, 0, false};
 volatile PulseChannel ch_steer = {SteerPinIn, 0, false, 1500, 0, false};
 volatile PulseChannel ch_cmd = {CmdPinIn, 0, false, 0, 0, false};
 
-volatile uint32_t hall_count = 0;
-volatile uint32_t hall_last_us = 0;
-volatile uint32_t hall_last_ms = 0;
-volatile uint32_t hall_dt_us = 0;
+volatile uint32_t enc_count = 0;
+volatile uint32_t enc_last_us = 0;
+volatile uint32_t enc_last_ms = 0;
+volatile uint32_t enc_dt_us = 0;
 
 static inline bool IRAM_ATTR pin_high(uint8_t pin) { return (REG_READ(GPIO_IN_REG) >> pin) & 1; }
 
@@ -101,15 +109,15 @@ void IRAM_ATTR speed_isr() { pulse_edge(ch_speed); }
 void IRAM_ATTR steer_isr() { pulse_edge(ch_steer); }
 void IRAM_ATTR cmd_isr() { pulse_edge(ch_cmd); }
 
-void IRAM_ATTR hall_isr() {
+void IRAM_ATTR encoder_isr() {
   const uint32_t now = micros();
   portENTER_CRITICAL_ISR(&mux);
-  const uint32_t dt = now - hall_last_us;
-  if (hall_count == 0 || dt >= HALL_MIN_DT_US) {
-    hall_dt_us = hall_count == 0 ? 0 : dt;
-    hall_last_us = now;
-    hall_last_ms = millis();
-    hall_count = hall_count + 1;
+  const uint32_t dt = now - enc_last_us;
+  if (enc_count == 0 || dt >= ENC_MIN_DT_US) {
+    enc_dt_us = enc_count == 0 ? 0 : dt;
+    enc_last_us = now;
+    enc_last_ms = millis();
+    enc_count = enc_count + 1;
   }
   portEXIT_CRITICAL_ISR(&mux);
 }
@@ -184,11 +192,11 @@ void setup() {
   pinMode(SpeedPinIn, INPUT);
   pinMode(SteerPinIn, INPUT);
   pinMode(CmdPinIn, INPUT);
-  pinMode(HE_Sensor_Pin, INPUT);
+  pinMode(ENCODER_PIN, INPUT);
   attachInterrupt(digitalPinToInterrupt(SpeedPinIn), speed_isr, CHANGE);
   attachInterrupt(digitalPinToInterrupt(SteerPinIn), steer_isr, CHANGE);
   attachInterrupt(digitalPinToInterrupt(CmdPinIn), cmd_isr, CHANGE);
-  attachInterrupt(digitalPinToInterrupt(HE_Sensor_Pin), hall_isr, RISING);
+  attachInterrupt(digitalPinToInterrupt(ENCODER_PIN), encoder_isr, RISING);
 }
 
 void loop() {
@@ -214,11 +222,11 @@ void loop() {
   in.rc_speed_us = ch_speed.width_us;
   in.rc_steer_us = ch_steer.width_us;
   ch3 = ch_cmd.width_us;
-  in.hall_seen = hall_count > 0;
-  in.hall_last_edge_ms = hall_last_ms;
-  h_count = hall_count;
-  h_last_us = hall_last_us;
-  h_dt = hall_dt_us;
+  in.enc_seen = enc_count > 0;
+  in.enc_last_edge_ms = enc_last_ms;
+  h_count = enc_count;
+  h_last_us = enc_last_us;
+  h_dt = enc_dt_us;
   portEXIT_CRITICAL(&mux);
   in.rc_ch3_us = ch3;
   in.jetson_seen = jetson_seen;

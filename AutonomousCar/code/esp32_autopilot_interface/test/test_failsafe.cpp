@@ -46,9 +46,9 @@ struct Bench {
     in.jetson_speed_us = speed;
     in.jetson_steer_us = steer;
   }
-  void hall(uint32_t t) {
-    in.hall_seen = true;
-    in.hall_last_edge_ms = t;
+  void encoder(uint32_t t) {
+    in.enc_seen = true;
+    in.enc_last_edge_ms = t;
   }
   Output at(uint32_t t) {
     in.now_ms = t;
@@ -125,9 +125,9 @@ static void test_jetson_timeout_boundary() {
 static void test_jetson_loss_while_moving_brakes_then_neutral() {
   Bench b;
   b.arm_and_go_auto(1000, 1580);
-  // car moving: hall edges every 20 ms, Jetson commands keep coming until 2000
+  // car moving: encoder edges every 20 ms, Jetson commands keep coming until 2000
   for (uint32_t t = 1020; t <= 2000; t += 20) {
-    b.hall(t);
+    b.encoder(t);
     b.rc(t, 1100);
     b.jetson(t, 1580);
     CHECK_EQ(b.at(t).mode, MODE_AUTO);
@@ -135,25 +135,25 @@ static void test_jetson_loss_while_moving_brakes_then_neutral() {
   // Jetson goes silent at 2000; failsafe starts at 2201
   uint32_t t0 = 2201;
   for (uint32_t t = 2020; t < t0; t += 20) {
-    b.hall(t);
+    b.encoder(t);
     b.rc(t, 1100);
     b.at(t);
   }
   b.rc(t0, 1100);
-  b.hall(t0);
+  b.encoder(t0);
   Output o = b.at(t0);
   CHECK_EQ(o.mode, MODE_FAILSAFE_NO_JETSON);
   CHECK_EQ(o.speed_us, b.cfg.brake_us);
   CHECK_EQ(o.steer_us, b.cfg.steer_center_us);
   // still moving 1.5 s later: still braking
-  b.hall(t0 + 1500);
+  b.encoder(t0 + 1500);
   b.rc(t0 + 1500, 1100);
   CHECK_EQ(b.at(t0 + 1500).speed_us, b.cfg.brake_us);
-  // stopped (no edge for > hall_moving_ms) and past brake_min_ms -> neutral
+  // stopped (no edge for > enc_moving_ms) and past brake_min_ms -> neutral
   b.rc(t0 + 1900, 1100);
   CHECK_EQ(b.at(t0 + 1900).speed_us, 1500);
-  // and it stays neutral even if the hall sensor twitches (no second brake = no reverse)
-  b.hall(t0 + 1950);
+  // and it stays neutral even if the encoder twitches (no second brake = no reverse)
+  b.encoder(t0 + 1950);
   b.rc(t0 + 1950, 1100);
   CHECK_EQ(b.at(t0 + 1950).speed_us, 1500);
 }
@@ -161,9 +161,9 @@ static void test_jetson_loss_while_moving_brakes_then_neutral() {
 static void test_brake_holds_for_min_time_even_if_stopped_quickly() {
   Bench b;
   b.arm_and_go_auto(1000);
-  b.hall(1010);
+  b.encoder(1010);
   b.rc(1211, 1100);
-  Output o = b.at(1211);  // Jetson lost; hall edge 201 ms ago -> still "moving"
+  Output o = b.at(1211);  // Jetson lost; encoder edge 201 ms ago -> still "moving"
   CHECK_EQ(o.speed_us, b.cfg.brake_us);
   b.rc(1600, 1100);
   CHECK_EQ(b.at(1600).speed_us, b.cfg.brake_us);  // stopped, but < brake_min_ms
@@ -176,7 +176,7 @@ static void test_brake_max_time_even_if_still_moving() {
   b.arm_and_go_auto(1000);
   uint32_t t0 = 1211;
   for (uint32_t t = 1020; t < t0 + b.cfg.brake_max_ms + 100; t += 20) {
-    b.hall(t);
+    b.encoder(t);
     b.rc(t, 1100);
     Output o = b.at(t);
     if (t >= t0 && t < t0 + b.cfg.brake_max_ms) CHECK_EQ(o.speed_us, b.cfg.brake_us);
@@ -198,9 +198,9 @@ static void test_failsafe_after_reverse_command_does_not_brake() {
   // if the car was reversing, "brake" (< neutral) would drive it backwards harder
   Bench b;
   b.rc(1000, 1900, 1300);  // manual, reversing
-  b.hall(1000);
+  b.encoder(1000);
   CHECK_EQ(b.at(1000).speed_us, 1300);
-  b.hall(1150);
+  b.encoder(1150);
   Output o = b.at(1150);  // RC lost at 1101
   CHECK_EQ(o.mode, MODE_FAILSAFE_NO_RC);
   CHECK_EQ(o.speed_us, 1500);
@@ -209,9 +209,9 @@ static void test_failsafe_after_reverse_command_does_not_brake() {
 static void test_rc_loss_in_manual_brakes_when_moving_forward() {
   Bench b;
   b.rc(1000, 1900, 1700);
-  b.hall(1000);
+  b.encoder(1000);
   CHECK_EQ(b.at(1000).speed_us, 1700);
-  b.hall(1150);
+  b.encoder(1150);
   CHECK_EQ(b.at(1150).speed_us, b.cfg.brake_us);
 }
 

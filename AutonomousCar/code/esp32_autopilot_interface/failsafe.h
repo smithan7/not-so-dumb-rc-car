@@ -14,11 +14,11 @@
 // failsafe. So a Jetson that comes back, or a car powered up with the switch in AUTO, does not
 // drive off on its own: the operator must flip to MANUAL and back.
 //
-// Failsafe throttle: brake (brake_us) only if the car is moving (hall edge within
-// hall_moving_ms) AND the last throttle output was not reverse when the failsafe started; hold
+// Failsafe throttle: brake (brake_us) only if the car is moving (encoder edge within
+// enc_moving_ms) AND the last throttle output was not reverse when the failsafe started; hold
 // it for at least brake_min_ms, until the car stops, and at most brake_max_ms. Then neutral for
 // the rest of the failsafe - never a second brake, since brake-from-standstill after neutral is
-// reverse on this kind of ESC. If the hall sensor is dead the car is treated as stopped and
+// reverse on this kind of ESC. If the encoder is dead the car is treated as stopped and
 // simply coasts (neutral).
 #pragma once
 #include <stdint.h>
@@ -46,7 +46,7 @@ struct Config {
   int auto_steer_max_us = 1700;
   uint32_t rc_timeout_ms = 100;      // receiver frames are ~5.5 ms
   uint32_t jetson_timeout_ms = 200;  // Jetson commands at 50 Hz (>= 5 Hz required)
-  uint32_t hall_moving_ms = 300;     // a driveshaft edge within this = moving
+  uint32_t enc_moving_ms = 300;     // a driveshaft edge within this = moving
   uint32_t brake_min_ms = 1000;
   uint32_t brake_max_ms = 3000;
 };
@@ -59,8 +59,8 @@ struct Inputs {
   bool jetson_seen = false;
   uint32_t jetson_last_ms = 0;
   int jetson_speed_us = 1500, jetson_steer_us = 1500;
-  bool hall_seen = false;
-  uint32_t hall_last_edge_ms = 0;
+  bool enc_seen = false;
+  uint32_t enc_last_edge_ms = 0;
 };
 
 struct Output {
@@ -90,7 +90,7 @@ class Arbiter {
   Output update(const Inputs& in) {
     const bool rc_ok = fresh(in.rc_seen, in.rc_last_ms, in.now_ms, cfg_.rc_timeout_ms);
     const bool jetson_ok = fresh(in.jetson_seen, in.jetson_last_ms, in.now_ms, cfg_.jetson_timeout_ms);
-    const bool moving = fresh(in.hall_seen, in.hall_last_edge_ms, in.now_ms, cfg_.hall_moving_ms);
+    const bool moving = fresh(in.enc_seen, in.enc_last_edge_ms, in.now_ms, cfg_.enc_moving_ms);
 
     int mode;
     if (!rc_ok) {
