@@ -62,6 +62,18 @@ s["pwm"], s["gps"]           # all share one time column, "t" (s since session s
 
 Measure the wheelbase and set `sysid_model.WHEELBASE_M`: yaw rate only identifies steer_gain / wheelbase.
 
+## Control (simulation)
+
+UKF state estimation, plus pure pursuit and MPPI controllers, rehearsed end to end: identify the
+simulated car, then drive laps on the estimate. See [CONTROL_ROADMAP.md](CONTROL_ROADMAP.md) for
+the design, the results and the gates for moving each stage onto the real car.
+
+```sh
+cd AutonomousCar/code
+python closed_loop.py --quick              # ~30 s smoke run
+python closed_loop.py --plot paths.png     # full study, 4 scenarios x 3 controllers x 3 seeds
+```
+
 ## Tests
 
 ```sh
