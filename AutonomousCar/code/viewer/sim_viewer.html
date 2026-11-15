@@ -1,0 +1,401 @@
+<title>Lot Replay</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Barlow:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: timing-screen header, the lot map as the hero, a telemetry rail beside it (stacks on phones), scrubber below. */
+:root {
+  --bg: #eef0ee; --panel: #ffffff; --ink: #1d2420; --muted: #66706a; --line: #d5dad6;
+  --lot: #3a3f3d; --lot-paint: #5b615e; --edge: #e9ece8; --plan-edge: #8fd3ff;
+  --cone-l: #ff7a1a; --cone-r: #f5d000; --accent: #0f7b5f; --warn: #c25e00; --bad: #c0392b;
+  --car-0: #3fa7ff; --car-1: #ff5fa2; --car-2: #3fe0a5; --car-3: #c9a6ff;
+  --f-display: "Barlow Condensed", "Arial Narrow", sans-serif;
+  --f-body: "Barlow", system-ui, sans-serif;
+  --f-mono: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #121614; --panel: #1b201e; --ink: #e6ebe7; --muted: #9aa49e; --line: #2c3330;
+  --lot: #262a29; --lot-paint: #3e4441; --edge: #d9ddd9; --accent: #3fd1a2; --warn: #ffa24c; --bad: #ff6b5b;
+  color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #121614; --panel: #1b201e; --ink: #e6ebe7; --muted: #9aa49e; --line: #2c3330;
+  --lot: #262a29; --lot-paint: #3e4441; --edge: #d9ddd9; --accent: #3fd1a2; --warn: #ffa24c; --bad: #ff6b5b;
+  color-scheme: dark }
+* { box-sizing: border-box }
+[hidden] { display: none !important }
+html, body { height: 100% }
+body { background: var(--bg); color: var(--ink); font: 15px/1.45 var(--f-body);
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 14px 18px }
+.wrap { max-width: 1400px; margin: 0 auto; display: grid; gap: 12px }
+header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 16px }
+h1 { font: 700 30px/1 var(--f-display); letter-spacing: .02em; margin: 0; text-transform: uppercase }
+.sub { color: var(--muted); font-size: 14px }
+.chip { font: 500 12px/1 var(--f-mono); padding: 5px 8px; border-radius: 4px; border: 1px solid var(--line); background: var(--panel); white-space: nowrap }
+.chip.fixed { color: var(--accent); border-color: var(--accent) }
+.chip.float { color: var(--warn); border-color: var(--warn) }
+.main { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 12px; align-items: start }
+@media (max-width: 900px) { .main { grid-template-columns: minmax(0, 1fr) } }
+.mapbox { position: relative; background: var(--lot); border-radius: 6px; overflow: hidden; aspect-ratio: 40 / 25; max-width: 100% }
+#map { width: 100%; height: 100%; display: block; touch-action: none; cursor: grab }
+.legend { position: absolute; left: 10px; bottom: 8px; display: flex; flex-wrap: wrap; gap: 4px 12px; font: 11px/1.3 var(--f-mono); color: #d7dcd8; pointer-events: none }
+.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 4px; vertical-align: -1px }
+.mapctl { position: absolute; right: 8px; top: 8px; display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end }
+.mapctl label { font: 12px var(--f-mono); color: #e6ebe7; background: rgba(0,0,0,.45); padding: 4px 8px; border-radius: 4px; cursor: pointer; user-select: none }
+.rail { display: grid; gap: 12px; min-width: 0 }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 12px }
+.card h2 { font: 600 13px/1 var(--f-display); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin: 0 0 10px }
+.runs { display: grid; gap: 6px }
+.run { display: grid; grid-template-columns: 14px minmax(0,1fr) auto; gap: 8px; align-items: center; padding: 7px 8px; border-radius: 4px; border: 1px solid transparent; cursor: pointer; background: none; color: inherit; font: inherit; text-align: left; width: 100% }
+.run:hover { border-color: var(--line) }
+.run[aria-pressed="true"] { border-color: var(--ink) }
+.run.off { opacity: .4 }
+.run .sw { width: 14px; height: 14px; border-radius: 3px }
+.run .nm { font: 600 17px/1.1 var(--f-display); letter-spacing: .02em }
+.run .meta { font: 11px/1.3 var(--f-mono); color: var(--muted) }
+.run .lap { font: 500 15px var(--f-mono); font-variant-numeric: tabular-nums }
+.vis { font: 11px var(--f-mono); color: var(--muted); background: none; border: 1px solid var(--line); border-radius: 3px; padding: 2px 5px; cursor: pointer }
+.tele { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 12px }
+.k { font: 11px/1 var(--f-mono); color: var(--muted); letter-spacing: .04em; text-transform: uppercase }
+.v { font: 600 26px/1.1 var(--f-display); font-variant-numeric: tabular-nums }
+.v small { font: 500 13px var(--f-mono); color: var(--muted); margin-left: 3px }
+.bar { height: 6px; background: var(--line); border-radius: 3px; position: relative; margin-top: 6px; overflow: hidden }
+.bar b { position: absolute; top: 0; bottom: 0; background: var(--accent) }
+.bar::after { content: ""; position: absolute; left: 50%; top: -2px; bottom: -2px; width: 1px; background: var(--muted) }
+canvas.spark { width: 100%; height: 54px; display: block }
+.sparkhead { display: flex; justify-content: space-between; font: 11px var(--f-mono); color: var(--muted); margin-top: 8px }
+.laps { font: 12px/1.6 var(--f-mono); font-variant-numeric: tabular-nums; color: var(--muted); overflow-wrap: anywhere }
+.laps .best { color: var(--ink); font-weight: 500 }
+.scrub { display: grid; grid-template-columns: auto auto minmax(0, 1fr) auto; gap: 10px; align-items: center }
+button.ctl { font: 600 15px var(--f-display); letter-spacing: .05em; text-transform: uppercase; background: var(--ink); color: var(--bg); border: 0; border-radius: 4px; padding: 7px 14px; cursor: pointer; min-width: 74px }
+select, .file { font: 13px var(--f-mono); background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: 4px; padding: 5px 6px }
+.time { font: 500 14px var(--f-mono); font-variant-numeric: tabular-nums; white-space: nowrap }
+.tl { position: relative; height: 36px }
+.tl input { position: absolute; left: 0; right: 0; top: 0; height: 24px; width: 100%; margin: 0; background: transparent; accent-color: var(--accent) }
+.tl .bands { position: absolute; left: 0; right: 0; top: 28px; height: 5px; border-radius: 3px; background: var(--line); overflow: hidden; pointer-events: none }
+.tl .bands span { position: absolute; top: 0; bottom: 0; background: var(--warn); opacity: .55 }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px }
+.foot { color: var(--muted); font-size: 13px; max-width: 75ch }
+.foot code { font: 12px var(--f-mono) }
+.empty { display: grid; place-items: center; color: #d7dcd8; font: 14px var(--f-mono); position: absolute; inset: 0; text-align: center; padding: 20px }
+@media (max-width: 560px) { .scrub { grid-template-columns: auto auto minmax(0,1fr) } .scrub .time { grid-column: 1 / -1 } h1 { font-size: 24px } }
+</style>
+
+<div class="wrap">
+  <header>
+    <h1>Lot Replay</h1>
+    <span class="sub" id="desc">Simulated laps of the parking-lot course</span>
+    <span class="chip" id="rtk">RTK</span>
+    <span class="chip" id="clock">lap –</span>
+  </header>
+
+  <div class="main">
+    <div class="mapbox">
+      <canvas id="map" aria-label="Map of the course with cars, cones and the estimator's uncertainty"></canvas>
+      <div class="mapctl">
+        <label><input type="checkbox" id="follow"> follow car</label>
+        <label><input type="checkbox" id="rolls" checked> MPPI samples</label>
+        <label><input type="checkbox" id="dets" checked> cone detections</label>
+        <label><input type="checkbox" id="sig10" checked> uncertainty ×10</label>
+      </div>
+      <div class="legend" id="legend"></div>
+      <div class="empty" id="empty" hidden>Open a replay JSON from <code>closed_loop.py --export</code></div>
+    </div>
+
+    <div class="rail">
+      <div class="card">
+        <h2>Controllers</h2>
+        <div class="runs" id="runs"></div>
+      </div>
+      <div class="card">
+        <h2 id="teleh">Telemetry</h2>
+        <div class="tele">
+          <div><div class="k">speed</div><div class="v" id="t-v">–<small>m/s</small></div></div>
+          <div><div class="k">lateral accel</div><div class="v" id="t-g">–<small>g</small></div></div>
+          <div><div class="k">estimate error</div><div class="v" id="t-err">–<small>cm</small></div></div>
+          <div><div class="k">filter std dev</div><div class="v" id="t-sig">–<small>cm</small></div></div>
+          <div><div class="k">track margin</div><div class="v" id="t-m">–<small>cm</small></div></div>
+          <div><div class="k">cones seen</div><div class="v" id="t-c">–</div></div>
+          <div><div class="k">throttle pwm</div><div class="v" id="t-thr" style="font-size:18px">–</div><div class="bar"><b id="b-thr"></b></div></div>
+          <div><div class="k">steer pwm</div><div class="v" id="t-st" style="font-size:18px">–</div><div class="bar"><b id="b-st"></b></div></div>
+        </div>
+        <div class="sparkhead"><span>speed, m/s</span><span id="sp-max"></span></div>
+        <canvas class="spark" id="sp-v"></canvas>
+        <div class="sparkhead"><span>estimate error vs 2σ, cm</span><span id="sp-emax"></span></div>
+        <canvas class="spark" id="sp-e"></canvas>
+        <div class="sparkhead"><span>laps</span></div>
+        <div class="laps" id="laps"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card scrub">
+    <button class="ctl" id="play" type="button">Play</button>
+    <select id="speed" aria-label="Playback speed">
+      <option value="0.25">0.25×</option><option value="0.5">0.5×</option><option value="1" selected>1×</option>
+      <option value="2">2×</option><option value="4">4×</option>
+    </select>
+    <div class="tl"><div class="bands" id="bands"></div><input type="range" id="t" min="0" max="1" step="0.05" value="0" aria-label="Replay time"></div>
+    <span class="time" id="tt">0.00 s</span>
+  </div>
+
+  <p class="foot">
+    Solid white edges and filled cones are where the cones really stand. Blue dashed edges and the crosses are the RTK-surveyed cone map, which is all the car knows.
+    The hollow outline is the filter's estimate of the car, with its 2σ ellipse. Orange on the timeline marks RTK float (degraded) periods.
+    Space plays and pauses, arrow keys step, and you can drag and scroll to pan and zoom.
+    <span id="loadrow">Load another replay: <input class="file" type="file" id="file" accept=".json,application/json"></span>
+  </p>
+</div>
+
+<script type="application/json" id="replay"></script>
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+  const CAR_L = 0.6, HZ = 20;
+  let R = null, sel = 0, hidden = new Set(), t = 0, tMax = 1, playing = false, last = 0;
+  let view = { cx: 20, cy: 12.5, scale: 1, user: false };
+
+  // ---------- data ----------
+  function load(data) {
+    R = data; sel = Math.max(0, R.runs.findIndex(r => r.controller === "mppi_ukf")); hidden = new Set();
+    tMax = Math.max(...R.runs.map(r => r.frames.length / HZ)) - 1 / HZ;
+    $("t").max = tMax.toFixed(2); t = 0; view.user = false;
+    const c = R.cones ? `${R.cones.true.length} cones, survey σ ${(R.cones.survey_sd * 100).toFixed(0)} cm` : "fixed-width course, no cones";
+    $("desc").textContent = `Scenario ${R.scenario}, seed ${R.seed}. ${c}. GPS noise ${R.gps.noise} m.`;
+    $("empty").hidden = true;
+    buildRuns(); buildBands(); buildLegend(); fit(); draw();
+  }
+  $("file").addEventListener("change", e => {
+    const f = e.target.files[0]; if (!f) return;
+    f.text().then(s => load(JSON.parse(s))).catch(err => { $("empty").hidden = false; $("empty").textContent = "That file is not a replay: " + err.message; });
+  });
+
+  const carColor = i => css(`--car-${i % 4}`);
+  const frameOf = (run, tt) => run.frames[Math.min(run.frames.length - 1, Math.max(0, Math.round(tt * HZ)))];
+  const inFloat = tt => { const o = R && R.outage; return !!o && tt >= o.first_s && (tt - o.first_s) % o.every_s < o.duration_s; };
+
+  function buildRuns() {
+    const box = $("runs"); box.innerHTML = "";
+    R.runs.forEach((r, i) => {
+      const b = document.createElement("button");
+      b.className = "run"; b.type = "button"; b.setAttribute("aria-pressed", i === sel);
+      const bad = r.cones_hit || r.left_track ? ` · <span style="color:var(--bad)">${r.cones_hit} cone${r.cones_hit === 1 ? "" : "s"} hit</span>` : "";
+      b.innerHTML = `<span class="sw" style="background:${carColor(i)}"></span>
+        <span><div class="nm">${r.controller.replace("_", " ")}</div><div class="meta">${r.off_track_pct.toFixed(1)}% over line${bad}</div></span>
+        <span style="display:grid;gap:4px;justify-items:end"><span class="lap">${isFinite(r.best_lap) ? r.best_lap.toFixed(2) + " s" : "–"}</span><span class="vis" data-i="${i}" role="button" tabindex="0">${hidden.has(i) ? "show" : "hide"}</span></span>`;
+      b.addEventListener("click", e => {
+        if (e.target.classList.contains("vis")) { hidden.has(i) ? hidden.delete(i) : hidden.add(i); }
+        else { sel = i; hidden.delete(i); }
+        buildRuns(); draw();
+      });
+      if (hidden.has(i)) b.classList.add("off");
+      box.appendChild(b);
+    });
+    $("teleh").textContent = "Telemetry · " + R.runs[sel].controller.replace("_", " ");
+    const laps = R.runs[sel].laps, best = Math.min(...laps.slice(1).length ? laps.slice(1) : laps);
+    $("laps").innerHTML = laps.length ? laps.map((l, k) => `<span class="${l === best ? "best" : ""}">L${k + 1} ${l.toFixed(2)}${k === 0 ? " (standing start)" : ""}</span>`).join(" · ") : "no complete lap";
+  }
+  function buildBands() {
+    const b = $("bands"); b.innerHTML = ""; const o = R.outage; if (!o) return;
+    for (let s = o.first_s; s < tMax; s += o.every_s) {
+      const sp = document.createElement("span");
+      sp.style.left = (100 * s / tMax) + "%"; sp.style.width = (100 * Math.min(o.duration_s, tMax - s) / tMax) + "%";
+      b.appendChild(sp);
+    }
+  }
+  function buildLegend() {
+    const items = [];
+    if (R.cones) items.push(["--cone-l", "left cone"], ["--cone-r", "right cone"]);
+    items.push(["--plan-edge", "planner's edge"]);
+    $("legend").innerHTML = items.map(([c, l]) => `<span><i style="background:${css(c)}"></i>${l}</span>`).join("");
+  }
+
+  // ---------- view ----------
+  const cv = $("map"), ctx = cv.getContext("2d");
+  function resize() {
+    const r = cv.getBoundingClientRect(), d = devicePixelRatio || 1;
+    cv.width = Math.round(r.width * d); cv.height = Math.round(r.height * d);
+    if (!view.user) fit();
+    draw();
+  }
+  function fit() {
+    const W = cv.width || 1, H = cv.height || 1;
+    view.cx = 20; view.cy = 12.5; view.scale = Math.min(W / 41, H / 26);
+  }
+  const X = x => cv.width / 2 + (x - view.cx) * view.scale;
+  const Y = y => cv.height / 2 - (y - view.cy) * view.scale;
+  new ResizeObserver(resize).observe(cv);
+  let drag = null;
+  cv.addEventListener("pointerdown", e => { drag = { x: e.clientX, y: e.clientY, cx: view.cx, cy: view.cy }; cv.setPointerCapture(e.pointerId); cv.style.cursor = "grabbing"; });
+  cv.addEventListener("pointermove", e => {
+    if (!drag) return; const d = devicePixelRatio || 1;
+    view.cx = drag.cx - (e.clientX - drag.x) * d / view.scale; view.cy = drag.cy + (e.clientY - drag.y) * d / view.scale;
+    view.user = true; $("follow").checked = false; draw();
+  });
+  cv.addEventListener("pointerup", () => { drag = null; cv.style.cursor = "grab"; });
+  cv.addEventListener("wheel", e => { e.preventDefault(); view.scale *= Math.exp(-e.deltaY * 0.0015); view.user = true; draw(); }, { passive: false });
+  cv.addEventListener("dblclick", () => { view.user = false; fit(); draw(); });
+
+  // ---------- drawing ----------
+  function poly(pts, close) { ctx.beginPath(); pts.forEach(([x, y], i) => i ? ctx.lineTo(X(x), Y(y)) : ctx.moveTo(X(x), Y(y))); if (close) ctx.closePath(); }
+  function carShape(x, y, psi, fill, stroke, lw) {
+    const c = Math.cos(psi), s = Math.sin(psi), hl = CAR_L / 2, hw = R.car_half_width;
+    const pts = [[hl, hw], [hl, -hw], [-hl, -hw], [-hl, hw]].map(([a, b]) => [x + a * c - b * s, y + a * s + b * c]);
+    poly(pts, true);
+    if (fill) { ctx.fillStyle = fill; ctx.fill(); }
+    if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = lw; ctx.stroke(); }
+    // nose mark
+    ctx.beginPath(); ctx.moveTo(X(x + hl * c), Y(y + hl * s)); ctx.lineTo(X(x + (hl + 0.25) * c), Y(y + (hl + 0.25) * s));
+    ctx.strokeStyle = stroke || fill; ctx.lineWidth = Math.max(1, lw || 1.5); ctx.stroke();
+  }
+  function ellipse(x, y, P, k, color) {
+    const a = P[0], b = P[1], c = P[2], tr = (a + c) / 2, det = Math.sqrt(Math.max(((a - c) / 2) ** 2 + b * b, 0));
+    const l1 = tr + det, l2 = Math.max(tr - det, 0), ang = 0.5 * Math.atan2(2 * b, a - c);
+    ctx.beginPath(); ctx.ellipse(X(x), Y(y), 2 * k * Math.sqrt(l1) * view.scale, 2 * k * Math.sqrt(l2) * view.scale, -ang, 0, 2 * Math.PI);
+    ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.setLineDash([4, 3]); ctx.stroke(); ctx.setLineDash([]);
+  }
+
+  function draw() {
+    if (!R || !cv.width) return;
+    const d = devicePixelRatio || 1, W = cv.width, H = cv.height;
+    const runSel = R.runs[sel], fs = frameOf(runSel, t);
+    if ($("follow").checked) { view.cx = fs.x; view.cy = fs.y; view.scale = Math.min(W, H) / 9; view.user = true; }
+    ctx.fillStyle = css("--lot"); ctx.fillRect(0, 0, W, H);
+    // the lot and its paint
+    ctx.strokeStyle = css("--lot-paint"); ctx.lineWidth = 2 * d; ctx.strokeRect(X(0), Y(25), 40 * view.scale, 25 * view.scale);
+    ctx.lineWidth = 1 * d;
+    for (let x = 2.7; x < 40; x += 2.7) { ctx.beginPath(); ctx.moveTo(X(x), Y(25)); ctx.lineTo(X(x), Y(23.8)); ctx.stroke(); }
+    // track surface between the true edges
+    const C = R.course;
+    ctx.beginPath(); C.left_true.forEach(([x, y], i) => i ? ctx.lineTo(X(x), Y(y)) : ctx.moveTo(X(x), Y(y))); ctx.closePath();
+    C.right_true.slice().reverse().forEach(([x, y], i) => i ? ctx.lineTo(X(x), Y(y)) : ctx.moveTo(X(x), Y(y))); ctx.closePath();
+    ctx.fillStyle = "rgba(255,255,255,0.035)"; ctx.fill("evenodd");
+    ctx.strokeStyle = css("--edge"); ctx.globalAlpha = 0.75; ctx.lineWidth = 1.5 * d;
+    poly(C.left_true, true); ctx.stroke(); poly(C.right_true, true); ctx.stroke(); ctx.globalAlpha = 1;
+    ctx.strokeStyle = css("--plan-edge"); ctx.lineWidth = 1 * d; ctx.setLineDash([6 * d, 5 * d]);
+    poly(C.left, true); ctx.stroke(); poly(C.right, true); ctx.stroke();
+    ctx.globalAlpha = 0.35; poly(C.center, true); ctx.stroke(); ctx.globalAlpha = 1; ctx.setLineDash([]);
+    // cones: true (filled) and surveyed (cross + 2 sigma)
+    if (R.cones) {
+      const r = Math.max(0.12 * view.scale, 2.5 * d), sd = R.cones.survey_sd;
+      R.cones.true.forEach(([x, y], i) => {
+        ctx.beginPath(); ctx.arc(X(x), Y(y), r, 0, 2 * Math.PI);
+        ctx.fillStyle = css(R.cones.side[i] > 0 ? "--cone-l" : "--cone-r"); ctx.fill();
+      });
+      ctx.strokeStyle = css("--plan-edge"); ctx.lineWidth = 1 * d;
+      R.cones.map.forEach(([x, y]) => {
+        const a = Math.max(0.1 * view.scale, 3 * d);
+        ctx.beginPath(); ctx.moveTo(X(x) - a, Y(y)); ctx.lineTo(X(x) + a, Y(y)); ctx.moveTo(X(x), Y(y) - a); ctx.lineTo(X(x), Y(y) + a); ctx.stroke();
+        if (2 * sd * view.scale > 3 * d) { ctx.beginPath(); ctx.arc(X(x), Y(y), 2 * sd * view.scale, 0, 2 * Math.PI); ctx.stroke(); }
+      });
+    }
+    // trails, then cars (selected last, on top)
+    const order = R.runs.map((_, i) => i).filter(i => !hidden.has(i) && i !== sel).concat(hidden.has(sel) ? [] : [sel]);
+    for (const i of order) {
+      const run = R.runs[i], col = carColor(i), k1 = Math.min(run.frames.length - 1, Math.round(t * HZ));
+      ctx.strokeStyle = col; ctx.globalAlpha = 0.5; ctx.lineWidth = 2 * d; ctx.beginPath();
+      for (let k = Math.max(0, k1 - 3 * HZ); k <= k1; k++) { const f = run.frames[k]; k === Math.max(0, k1 - 3 * HZ) ? ctx.moveTo(X(f.x), Y(f.y)) : ctx.lineTo(X(f.x), Y(f.y)); }
+      ctx.stroke(); ctx.globalAlpha = 1;
+    }
+    for (const i of order) {
+      const run = R.runs[i], f = frameOf(run, t), col = carColor(i), isSel = i === sel;
+      if (isSel && f.roll && $("rolls").checked) {
+        ctx.strokeStyle = col; ctx.globalAlpha = 0.22; ctx.lineWidth = 1 * d;
+        f.roll.forEach(p => { poly(p); ctx.stroke(); }); ctx.globalAlpha = 0.9; ctx.lineWidth = 2 * d;
+        poly(f.plan); ctx.setLineDash([2 * d, 3 * d]); ctx.stroke(); ctx.setLineDash([]); ctx.globalAlpha = 1;
+      }
+      if (isSel && f.det && f.det.length && $("dets").checked) {
+        const cx = f.x + 0.25 * Math.cos(f.psi), cy = f.y + 0.25 * Math.sin(f.psi);
+        f.det.forEach(([r, b, sd]) => {
+          const px = cx + r * Math.cos(f.psi + b), py = cy + r * Math.sin(f.psi + b);
+          ctx.strokeStyle = css(sd > 0 ? "--cone-l" : "--cone-r"); ctx.globalAlpha = 0.6; ctx.lineWidth = 1 * d;
+          ctx.beginPath(); ctx.moveTo(X(cx), Y(cy)); ctx.lineTo(X(px), Y(py)); ctx.stroke(); ctx.globalAlpha = 1;
+          ctx.beginPath(); ctx.arc(X(px), Y(py), 3.5 * d, 0, 2 * Math.PI); ctx.lineWidth = 1.5 * d; ctx.stroke();
+        });
+      }
+      carShape(f.x, f.y, f.psi, col, isSel ? css("--edge") : null, 1.5 * d);
+      if (isSel) {
+        carShape(f.xe, f.ye, f.psie, null, css("--edge"), 1 * d);
+        ellipse(f.xe, f.ye, f.P, $("sig10").checked ? 10 : 1, css("--edge"));
+      }
+    }
+    tele(fs, runSel);
+  }
+
+  // ---------- telemetry ----------
+  function setV(id, txt, unit) { $(id).innerHTML = unit ? `${txt}<small>${unit}</small>` : txt; }
+  function tele(f, run) {
+    setV("t-v", f.v.toFixed(1), "m/s"); setV("t-g", Math.abs(f.alat).toFixed(2), "g");
+    setV("t-err", (100 * Math.hypot(f.x - f.xe, f.y - f.ye)).toFixed(1), "cm");
+    setV("t-sig", (100 * Math.sqrt(Math.max((f.P[0] + f.P[2]) / 2, 0))).toFixed(1), "cm");
+    setV("t-m", f.margin != null ? (100 * f.margin).toFixed(0) : "–", f.margin != null ? "cm" : "");
+    setV("t-c", f.det ? String(f.det.length) : "–");
+    $("t-thr").textContent = f.thr; $("t-st").textContent = f.st;
+    const bar = (el, u, span) => { const v = Math.max(-1, Math.min(1, (u - 1500) / span)); el.style.left = (50 + Math.min(0, v) * 50) + "%"; el.style.width = (Math.abs(v) * 50) + "%"; };
+    bar($("b-thr"), f.thr, 200); bar($("b-st"), f.st, 450);
+    const fl = inFloat(t);
+    $("rtk").textContent = R.outage ? (fl ? "RTK FLOAT" : "RTK FIXED") : (R.gps.noise < 0.1 ? "RTK FIXED" : "GPS");
+    $("rtk").className = "chip " + (fl ? "float" : (R.gps.noise < 0.1 || R.outage ? "fixed" : ""));
+    let acc = 0, lap = 1; for (const l of run.laps) { if (t >= acc + l) { acc += l; lap++; } else break; }
+    $("clock").textContent = lap > run.laps.length && run.laps.length ? `finished` : `lap ${lap} · ${(t - acc).toFixed(2)} s`;
+    $("tt").textContent = `${t.toFixed(2)} / ${tMax.toFixed(1)} s`;
+    $("t").value = t;
+    sparks(run);
+  }
+  function spark(id, series, color, playX, extra) {
+    const c = $(id), d = devicePixelRatio || 1, r = c.getBoundingClientRect();
+    c.width = Math.round(r.width * d); c.height = Math.round(r.height * d);
+    const g = c.getContext("2d"), W = c.width, H = c.height, n = series.length;
+    const max = Math.max(...series, ...(extra || [0]), 1e-6) * 1.1;
+    g.strokeStyle = css("--line"); g.lineWidth = 1; g.beginPath(); g.moveTo(0, H - 0.5); g.lineTo(W, H - 0.5); g.stroke();
+    const px = k => (k / Math.max(tMax * HZ, 1)) * W, py = v => H - (v / max) * (H - 4);
+    if (extra) { g.beginPath(); extra.forEach((v, k) => k ? g.lineTo(px(k), py(v)) : g.moveTo(px(k), py(v))); g.lineTo(px(n - 1), H); g.lineTo(0, H); g.closePath(); g.fillStyle = css("--line"); g.fill(); }
+    g.beginPath(); series.forEach((v, k) => k ? g.lineTo(px(k), py(v)) : g.moveTo(px(k), py(v)));
+    g.strokeStyle = color; g.lineWidth = 1.5 * d; g.stroke();
+    const k = Math.min(n - 1, Math.round(t * HZ));
+    g.fillStyle = css("--ink"); g.fillRect(px(k) - d / 2, 0, d, H);
+    g.beginPath(); g.arc(px(k), py(series[k]), 3 * d, 0, 2 * Math.PI); g.fillStyle = color; g.fill();
+    return max / 1.1;
+  }
+  let sparkCache = null;
+  function sparks(run) {
+    if (!sparkCache || sparkCache.run !== run) {
+      sparkCache = { run, v: run.frames.map(f => f.v), e: run.frames.map(f => 100 * Math.hypot(f.x - f.xe, f.y - f.ye)),
+        s2: run.frames.map(f => 200 * Math.sqrt(Math.max((f.P[0] + f.P[2]) / 2, 0))) };
+    }
+    const col = carColor(sel);
+    $("sp-max").textContent = "max " + spark("sp-v", sparkCache.v, col, t).toFixed(1);
+    $("sp-emax").textContent = "shaded = 2σ";
+    spark("sp-e", sparkCache.e, col, t, sparkCache.s2);
+  }
+
+  // ---------- playback ----------
+  function tick(now) {
+    if (!playing) return;
+    const dt = Math.min((now - last) / 1000, 0.1); last = now;
+    t += dt * parseFloat($("speed").value);
+    if (t >= tMax) { t = tMax; playing = false; $("play").textContent = "Replay"; }
+    draw();
+    if (playing) requestAnimationFrame(tick);
+  }
+  function toggle() {
+    if (!R) return;
+    if (!playing && t >= tMax) t = 0;
+    playing = !playing; $("play").textContent = playing ? "Pause" : "Play";
+    if (playing) { last = performance.now(); requestAnimationFrame(tick); }
+  }
+  $("play").addEventListener("click", toggle);
+  $("t").addEventListener("input", e => { t = parseFloat(e.target.value); draw(); });
+  ["follow", "rolls", "dets", "sig10"].forEach(id => $(id).addEventListener("change", () => { if (id === "follow" && !$(id).checked) { view.user = false; fit(); } draw(); }));
+  document.addEventListener("keydown", e => {
+    if (e.target.tagName === "INPUT" && e.target.type !== "checkbox" || e.target.tagName === "SELECT") return;
+    if (e.code === "Space") { e.preventDefault(); toggle(); }
+    if (e.code === "ArrowRight" || e.code === "ArrowLeft") { e.preventDefault(); t = Math.max(0, Math.min(tMax, t + (e.code === "ArrowRight" ? 1 : -1) * (e.shiftKey ? 1 : 0.05))); draw(); }
+  });
+  matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { buildLegend(); draw(); });
+  const emb = $("replay").textContent.trim();
+  if (emb) { try { load(JSON.parse(emb)); } catch (e) { $("empty").hidden = false; $("empty").textContent = "Could not read the embedded replay: " + e.message; } }
+  else $("empty").hidden = false;
+})();
+</script>

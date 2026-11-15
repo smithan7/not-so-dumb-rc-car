@@ -153,7 +153,8 @@ class MPPI:
         st_span = self.p["delta_max"] / self.p["steer_gain"]
         self.lo = np.array([thr_limits[0], self.p["steer_center_us"] - st_span])
         self.hi = np.array([thr_limits[1], self.p["steer_center_us"] + st_span])
-        self.half_width = course.width / 2 - car_half_width
+        self.car_hw = car_half_width
+        self.half_width = course.width / 2 - car_half_width  # nominal; edges vary per course sample
         self.min_half_width = 0.25
         self.v_cap = v_max
         self.unc = param_uncertainty
@@ -198,12 +199,14 @@ class MPPI:
         return X0, p
 
     def _half_width(self, x_pred, P):
+        """Nominal half width minus the chance-constraint margin z * sigma, where sigma combines
+        the UKF cross-track std and the uncertainty of the surveyed edges."""
         if self.z_sigma <= 0:
             return self.half_width
         s, _ = self.course.project(x_pred[0], x_pred[1])
         _, _, _, n = self.course.at(s)
-        sig_e = math.sqrt(max(n @ P[np.ix_([IX, IY], [IX, IY])] @ n, 0.0))
-        return max(self.half_width - self.z_sigma * sig_e, self.min_half_width)
+        var_e = max(n @ P[np.ix_([IX, IY], [IX, IY])] @ n, 0.0) + self.course.edge_sd ** 2
+        return max(self.half_width - self.z_sigma * math.sqrt(var_e), self.min_half_width)
 
     def rollout_costs(self, X0, U_samp, p, half):
         K, H = U_samp.shape[:2]
@@ -212,12 +215,16 @@ class MPPI:
         s_prev, _ = self.course.lookup(x[:, 0], x[:, 1])
         progress = np.zeros(K)
         traj = np.empty((K, H, 2))
+        margin = self.half_width - half
+        up_edge = self.course.e_left - self.car_hw - margin
+        lo_edge = self.course.e_right + self.car_hw + margin
         for h in range(H):
             x, r, _ = self.model.step(x, U_samp[:, h, 0], U_samp[:, h, 1], self.dt, p)
             s, e = self.course.lookup(x[:, 0], x[:, 1])
             progress += self.course.wrap_ds(s - s_prev)
             s_prev = s
-            excess = np.maximum(np.abs(e) - half, 0.0)
+            i = self.course.index(s)
+            excess = np.maximum(np.maximum(e - up_edge[i], lo_edge[i] - e), 0.0)
             cost += self.w["track"] * ((excess > 0) + 5.0 * excess)
             alat = np.maximum(np.abs(x[:, 3] * r) - self.a_lat_max, 0.0)
             cost += self.w["alat"] * alat ** 2 + 50.0 * np.maximum(x[:, 3] - self.v_cap, 0.0)

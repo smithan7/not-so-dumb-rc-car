@@ -8,6 +8,10 @@ Measurements:
   encoder  v                          (ESP32, ~50 Hz)
   gps      x + bx, y + by at fix time (10 Hz, arrives `lag` s late)
   lateral  signed offset from the course centerline (optional: cone/edge detection)
+  cone     camera range/bearing/side to a cone, associated with the surveyed cone map
+           (nearest same-side mapped cone, innovation-gated). The map's own survey error is
+           added to the measurement noise, inflated because the same cone (and so the same
+           survey error) is seen in many consecutive frames.
 
 The GPS bias is not observable from these sensors; modelling it keeps the position covariance
 honest (it cannot shrink below the bias spread), which matters because the MPPI pairing uses
@@ -21,6 +25,7 @@ and encoder updates that arrived since. Its covariance is what the MPPI pairing 
 import math
 
 import numpy as np
+from scipy.spatial import cKDTree
 
 N = 8
 IX, IY, IPSI, IV, IR, IB, IGX, IGY = range(N)
@@ -33,7 +38,8 @@ def _wrap(a):
 class UKF:
     def __init__(self, z0, P0, q_accel=3.0, q_yaw_accel=8.0, q_bias=1e-3, q_side_vel=0.02, q_side_per_alat=0.03,
                  r_gyro=0.02, r_enc=0.05, r_enc_frac=0.02, r_gps=0.5, gps_bias_sd=0.3, gps_bias_tau=30.0,
-                 r_lateral=0.1, lateral_fn=None, history_s=1.0,
+                 r_lateral=0.1, lateral_fn=None, cone_map=None, cone_cfg=None, map_inflate=4.0,
+                 gate_chi2=11.6, assoc_radius=1.0, history_s=1.0,
                  alpha=0.5, beta=2.0, kappa=0.0):
         self.z = np.asarray(z0, float).copy()
         self.P = np.asarray(P0, float).copy()
@@ -43,6 +49,13 @@ class UKF:
         self.r_gyro, self.r_enc, self.r_enc_frac, self.r_gps = r_gyro, r_enc, r_enc_frac, r_gps
         self.gps_bias_sd, self.gps_bias_tau = gps_bias_sd, gps_bias_tau
         self.r_lateral, self.lateral_fn = r_lateral, lateral_fn
+        self.cone_map, self.cone_cfg = cone_map, cone_cfg
+        self.map_inflate, self.gate_chi2, self.assoc_radius = map_inflate, gate_chi2, assoc_radius
+        if cone_map is not None:
+            self._cone_idx = {sd: np.flatnonzero(cone_map.side == sd) for sd in (1, -1)}
+            self._cone_tree = {sd: cKDTree(cone_map.xy[i]) for sd, i in self._cone_idx.items()}
+        self.cone_stats = {"used": 0, "gated": 0, "unmatched": 0}
+        self._count = True
         lam = alpha ** 2 * (N + kappa) - N
         self.c = N + lam
         self.Wm = np.full(2 * N + 1, 0.5 / self.c)
@@ -108,7 +121,7 @@ class UKF:
         self.P = (self.Wc[:, None] * D).T @ D + Q
         self.z[IV] = max(self.z[IV], 0.0)
 
-    def _update(self, h, y, R):
+    def _update(self, h, y, R, gate=None):
         Z = self._sigma()
         Y = h(Z)
         y_hat = self.Wm @ Y
@@ -116,9 +129,11 @@ class UKF:
         DZ = Z - self.z
         DZ[:, IPSI] = _wrap(DZ[:, IPSI])
         S = (self.Wc[:, None] * DY).T @ DY + R
+        innov = np.atleast_1d(y - y_hat)
+        if gate is not None and float(innov @ np.linalg.solve(S, innov)) > gate:
+            return None  # outlier (false detection, wrong association, moved cone): skip
         C = (self.Wc[:, None] * DZ).T @ DY
         K = C @ np.linalg.inv(S)
-        innov = np.atleast_1d(y - y_hat)
         self.z = self.z + K @ innov
         self.z[IPSI] = _wrap(self.z[IPSI])
         self.P = self.P - K @ S @ K.T
@@ -153,7 +168,44 @@ class UKF:
                 raise ValueError("lateral measurement needs lateral_fn(x, y) -> e")
             return self._update(lambda Z: self.lateral_fn(Z[:, IX], Z[:, IY])[:, None], np.array([value]),
                                 np.eye(1) * self.r_lateral ** 2)
+        if kind == "cone":
+            return self._cone(*value)
         raise ValueError(kind)
+
+    def _cone(self, rng_m, bearing, side):
+        if self.cone_map is None:
+            raise ValueError("cone measurement needs cone_map")
+        c = self.cone_cfg
+        x, y, psi = self.z[IX], self.z[IY], self.z[IPSI]
+        off = c["cam_offset"]
+        cam = np.array([x + off * math.cos(psi), y + off * math.sin(psi)])
+        guess = cam + rng_m * np.array([math.cos(psi + bearing), math.sin(psi + bearing)])
+        dist, j = self._cone_tree[side].query(guess)
+        if dist > self.assoc_radius:
+            if self._count:
+                self.cone_stats["unmatched"] += 1
+            return None
+        i = self._cone_idx[side][j]
+        m = self.cone_map.xy[i]
+
+        def h(Z):
+            cx = Z[:, IX] + off * np.cos(Z[:, IPSI])
+            cy = Z[:, IY] + off * np.sin(Z[:, IPSI])
+            dx, dy = m[0] - cx, m[1] - cy
+            # bearing as the residual against the measured one, so the mean never straddles +-pi
+            return np.column_stack([np.hypot(dx, dy), _wrap(np.arctan2(dy, dx) - Z[:, IPSI] - bearing)])
+
+        d = m - cam
+        r = max(math.hypot(*d), 0.3)
+        u = d / r
+        J = np.vstack([u, np.array([-u[1], u[0]]) / r])  # d(range, bearing) / d(cone xy)
+        R_map = self.map_inflate * self.cone_map.sd[i] ** 2 * (J @ J.T)
+        sr = c["range_sd0"] + c["range_sd_per_m"] * rng_m
+        R = np.diag([sr ** 2, c["bearing_sd"] ** 2]) + R_map
+        nis = self._update(h, np.array([rng_m, 0.0]), R, gate=self.gate_chi2)
+        if self._count:
+            self.cone_stats["used" if nis is not None else "gated"] += 1
+        return nis
 
     # -- public API ------------------------------------------------------------------------
     def predict_to(self, t):
@@ -185,7 +237,9 @@ class UKF:
         self._meas = [m for m in self._meas if m[0] <= t0]
         nis = None
         for m in replay:
+            self._count = m is late  # stats count each measurement once, not on every replay
             r = self.update(*m)
+            self._count = True
             if m is late:
                 nis = r
         self.predict_to(t_now)

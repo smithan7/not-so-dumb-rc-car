@@ -3,6 +3,7 @@
     python closed_loop.py                 # full study: 4 scenarios x 3 controllers x 3 seeds (~3 min, 8 cores)
     python closed_loop.py --quick         # 1 seed, 2 laps, fewer MPPI samples
     python closed_loop.py --plot out.png  # also save the driven paths
+    python closed_loop.py --scenario cones_rtk_outage --export replay.html   # web replay
 
 Pipeline per scenario, mirroring what will happen on the real car:
   1. run the designed sysid passes (sysid_maneuvers) open loop on the simulated car, with the
@@ -23,6 +24,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+import cones as CN
 import sysid_maneuvers as D
 import sysid_model as M
 from controllers import MPPI, PurePursuit
@@ -34,6 +36,7 @@ TRUE_CAR = M.default_params(steer_center_us=1492.0, steer_gain=math.radians(0.09
                             gyro_bias=0.012, input_delay=0.045, deadband_us=35.0, speed_gain=0.14,
                             tau_speed=0.7, brake_gain=0.09, roll_decel=0.35, drag_coeff=0.012)
 CAR_HALF_WIDTH = 0.2
+CONE_HIT_R = CAR_HALF_WIDTH + CN.CONE_RADIUS  # car centre this close to a cone = touched it
 
 GPS_GOOD = {"rate_hz": 10.0, "lag_s": 0.2, "noise": 0.5, "bias_sd": 0.3, "bias_tau_s": 30.0}
 GPS_BAD = {"rate_hz": 10.0, "lag_s": 0.2, "noise": 1.0, "bias_sd": 0.6, "bias_tau_s": 30.0}
@@ -42,6 +45,18 @@ GPS_RTK = {"rate_hz": 10.0, "lag_s": 0.1, "noise": 0.03, "bias_sd": 0.03, "bias_
 GPS_RTK_OUTAGE = dict(GPS_RTK, float={"first_s": 12.0, "every_s": 25.0, "duration_s": 8.0, "noise": 0.3,
                                       "bias_sd": 0.4, "bias_tau_s": 10.0})
 L515 = {"rate_hz": 15.0, "lag_s": 0.07, "noise": 0.10, "p_valid": 0.7}
+CONE_CAMERA = CN.CAMERA  # L515 RGB cone detection against the RTK-surveyed cone map
+
+
+def make_track(seed, placement=CN.PLACEMENT):
+    """Cones as placed (true), as surveyed (map), and the planner course built from the map."""
+    rng = np.random.default_rng(1000 + seed)
+    design = parking_lot_course()
+    true = CN.layout_cones(design, rng, placement)
+    surveyed = CN.survey(true, rng, placement["survey_sd"])
+    course = CN.course_from_cones(design, surveyed)
+    return {"true": true, "map": surveyed, "course": course, "truth_edges": CN.truth_edges(course, true),
+            "max_gap": true.max_gap(design)}
 
 
 def make_plant(kind, params):
@@ -51,10 +66,12 @@ def make_plant(kind, params):
 class Sensors:
     """Gyro, encoder and lagged GPS sampled from a plant, as the logger would see them."""
 
-    def __init__(self, p_true, gps, rng, course=None):
+    def __init__(self, p_true, gps, rng, course=None, track=None):
         self.p, self.gps, self.rng, self.course = p_true, gps, rng, course
         self.lat = gps.get("lateral")
-        self.next = {"gyro": 0.0, "enc": 0.0, "gps": 0.0, "lateral": 0.0}
+        self.cam_cfg = gps.get("cones")
+        self.camera = CN.ConeCamera(track["true"], rng, self.cam_cfg) if self.cam_cfg else None
+        self.next = {"gyro": 0.0, "enc": 0.0, "gps": 0.0, "lateral": 0.0, "cones": 0.0}
         self.period = {"gyro": 1 / D.SENSORS["gyro"]["rate_hz"], "enc": 1 / D.SENSORS["encoder"]["rate_hz"],
                        "gps": 1 / gps["rate_hz"]}
         self.bias = gps["bias_sd"] * rng.standard_normal(2)  # stationary from the start
@@ -93,6 +110,11 @@ class Sensors:
             if self.rng.random() < self.lat["p_valid"]:  # cones in view and detected
                 _, e = self.course.project(*plant.state[:2])
                 self.pending.append((t + self.lat["lag_s"], t, ("lateral", float(e) + self.rng.normal(0, self.lat["noise"]))))
+        if self.camera and t >= self.next["cones"]:
+            self.next["cones"] += 1 / self.cam_cfg["rate_hz"]
+            X, Y, psi = plant.state[:3]
+            for det in self.camera.frame(X, Y, psi):
+                self.pending.append((t + self.cam_cfg["lag_s"], t, ("cone", det)))
         self.pending.sort(key=lambda m: m[0])
         while self.pending and self.pending[0][0] <= t:
             _, t_fix, val = self.pending.pop(0)
@@ -166,7 +188,10 @@ class RunResult:
     pos_2sigma_frac: float
     compute_ms_p50: float
     compute_ms_p99: float
+    cones_hit: int = 0
+    cone_stats: dict = None
     log: dict = field(repr=False, default=None)
+    frames: list = field(repr=False, default=None)
 
     @property
     def best_lap(self):
@@ -175,7 +200,10 @@ class RunResult:
 
 
 def drive(controller, course, kind, p_true, gps, duration_s=40.0, laps=3, seed=1, dt=0.001,
-          control_hz=50.0, scenario=""):
+          control_hz=50.0, scenario="", track=None, record_hz=0.0):
+    """Drive laps on the estimate. `track` (from make_track) puts the course on cones: `course`
+    is then the planner's course built from the survey, and the true cones judge the run.
+    record_hz > 0 keeps animation frames (true/estimated pose, covariance, detections, plan)."""
     rng = np.random.default_rng(seed)
     plant = make_plant(kind, p_true)
     (x0, y0), psi0 = course.xy[0], course.psi[0]
@@ -184,14 +212,18 @@ def drive(controller, course, kind, p_true, gps, duration_s=40.0, laps=3, seed=1
     lat = gps.get("lateral")
     ukf = initial_ukf(x0, y0, psi0, r_gps=gps["noise"], gps_bias_sd=gps["bias_sd"], gps_bias_tau=gps["bias_tau_s"],
                       r_lateral=lat["noise"] if lat else 0.1,
-                      lateral_fn=(lambda X, Y: course.project(X, Y)[1]) if lat else None)
-    sensors = Sensors(p_true, gps, rng, course)
+                      lateral_fn=(lambda X, Y: course.project(X, Y)[1]) if lat else None,
+                      cone_map=track["map"] if gps.get("cones") else None, cone_cfg=gps.get("cones"))
+    sensors = Sensors(p_true, gps, rng, course, track)
+    eL_t, eR_t = track["truth_edges"] if track else (course.e_left, course.e_right)
+    cone_xy = track["true"].xy if track else np.zeros((0, 2))
+    hit = set()
+    frames, next_rec, dets = [], 0.0, []
     sent = [(-1.0, 1500.0, 1500.0)]
     delay = p_true["input_delay"]
     ctrl_period, next_ctrl = 1.0 / control_hz, 0.0
-    half_limit = course.width / 2 - CAR_HALF_WIDTH
     s_prev, progress = 0.0, 0.0
-    lap_marks, log = [0.0], {k: [] for k in ("t", "x", "y", "v", "e", "xe", "ye", "sx", "sy", "alat", "beta")}
+    lap_marks, log = [0.0], {k: [] for k in ("t", "x", "y", "v", "e", "xe", "ye", "sx", "sy", "alat", "beta", "s")}
     left = False
     i_sent = 0
     n = int(duration_s / dt)
@@ -208,9 +240,14 @@ def drive(controller, course, kind, p_true, gps, duration_s=40.0, laps=3, seed=1
         plant.step(th_a, st_a, dt)
         for tm, kind_m, val in sensors.poll(t, plant):
             ukf.update(tm, kind_m, val)
+            if record_hz and kind_m == "cone":
+                dets.append(val)
         if k % 10 == 0:
             X, Y = plant.state[:2]
             s, e = course.project(X, Y)
+            if len(cone_xy):
+                d2 = np.sum((cone_xy - (X, Y)) ** 2, axis=1)
+                hit.update(np.flatnonzero(d2 < CONE_HIT_R ** 2).tolist())
             progress += course.wrap_ds(s - s_prev)
             s_prev = s
             if progress >= len(lap_marks) * course.length:
@@ -220,13 +257,20 @@ def drive(controller, course, kind, p_true, gps, duration_s=40.0, laps=3, seed=1
             log["e"].append(float(e)); log["xe"].append(z[IX]); log["ye"].append(z[IY])
             log["sx"].append(math.sqrt(P[IX, IX])); log["sy"].append(math.sqrt(P[IY, IY]))
             log["alat"].append(plant.lateral_accel); log["beta"].append(plant.sideslip)
-            if abs(e) > course.width / 2 + 1.0:
+            log["s"].append(float(s))
+            if record_hz and t >= next_rec:
+                next_rec += 1.0 / record_hz
+                frames.append(_frame(t, plant, z, P, controller, sent[-1], dets))
+                dets = []
+            ic = course.index(s)
+            if e > eL_t[ic] + 1.0 or e < eR_t[ic] - 1.0:
                 left = True  # into the cones / curb: end the run
                 break
             if len(lap_marks) > laps:
                 break
     L = {k: np.asarray(v) for k, v in log.items()}
-    excess = np.maximum(np.abs(L["e"]) - half_limit, 0.0)
+    ic = course.index(L["s"])
+    excess = np.maximum(np.maximum(L["e"] + CAR_HALF_WIDTH - eL_t[ic], eR_t[ic] - (L["e"] - CAR_HALF_WIDTH)), 0.0)
     err = np.hypot(L["x"] - L["xe"], L["y"] - L["ye"])
     # 2-D 2-sigma containment (chi2 with 2 dof at 86.5%): consistent filter -> ~0.865
     nees_ok = ((L["x"] - L["xe"]) / L["sx"]) ** 2 + ((L["y"] - L["ye"]) / L["sy"]) ** 2 <= 4.0
@@ -238,7 +282,26 @@ def drive(controller, course, kind, p_true, gps, duration_s=40.0, laps=3, seed=1
                      max_sideslip_deg=float(np.degrees(np.max(np.abs(L["beta"])))),
                      pos_rmse_m=float(np.sqrt(np.mean(err ** 2))), pos_2sigma_frac=float(np.mean(nees_ok)),
                      compute_ms_p50=float(np.percentile(comp, 50)), compute_ms_p99=float(np.percentile(comp, 99)),
-                     log=L)
+                     cones_hit=len(hit), cone_stats=dict(ukf.cone_stats), log=L, frames=frames or None)
+
+
+def _frame(t, plant, z, P, controller, cmd, dets):
+    """One animation frame: compact lists, rounded, for the web viewer."""
+    X, Y, psi = (float(v) for v in plant.state[:3])
+    f = {"t": round(t, 3), "x": round(X, 3), "y": round(Y, 3), "psi": round(psi, 3),
+         "v": round(float(plant.wheel_speed), 2), "xe": round(float(z[IX]), 3), "ye": round(float(z[IY]), 3),
+         "psie": round(float(z[2]), 3), "P": [round(float(P[i, j]), 5) for i, j in ((0, 0), (0, 1), (1, 1))],
+         "thr": round(cmd[1]), "st": round(cmd[2]), "alat": round(float(plant.lateral_accel) / 9.81, 2),
+         "det": [[round(r, 2), round(b, 3), sd] for r, b, sd in dets]}
+    margin = getattr(controller, "margin_used", None)
+    if margin:
+        f["margin"] = round(float(controller.half_width - margin[-1]), 3)
+    roll = getattr(controller, "last_rollouts", None)
+    if roll is not None:
+        f["plan"] = [[round(float(a), 2), round(float(b), 2)] for a, b in roll[0][::3]]
+        pick = np.linspace(1, len(roll) - 1, 8).astype(int)
+        f["roll"] = [[[round(float(a), 1), round(float(b), 1)] for a, b in roll[k][::6]] for k in pick]
+    return f
 
 
 SCENARIOS = {"nominal": ("kinematic", GPS_GOOD), "dynamic": ("dynamic", GPS_GOOD),
@@ -246,7 +309,12 @@ SCENARIOS = {"nominal": ("kinematic", GPS_GOOD), "dynamic": ("dynamic", GPS_GOOD
              "dynamic_lidar": ("dynamic", dict(GPS_GOOD, lateral=L515)),
              "dynamic_rtk_lidar": ("dynamic", dict(GPS_RTK, lateral=L515)),
              "dynamic_rtk_outage": ("dynamic", GPS_RTK_OUTAGE),
-             "dynamic_rtk_outage_lidar": ("dynamic", dict(GPS_RTK_OUTAGE, lateral=L515))}
+             "dynamic_rtk_outage_lidar": ("dynamic", dict(GPS_RTK_OUTAGE, lateral=L515)),
+             # on cones placed by hand (track rebuilt from the RTK survey), L515 RGB cone landmarks
+             "cones_rtk": ("dynamic", dict(GPS_RTK, cones=CONE_CAMERA)),
+             "cones_rtk_outage": ("dynamic", dict(GPS_RTK_OUTAGE, cones=CONE_CAMERA)),
+             "cones_gps": ("dynamic", dict(GPS_GOOD, cones=CONE_CAMERA)),
+             "cones_rtk_outage_blind": ("dynamic", dict(GPS_RTK_OUTAGE, on_cones=True))}
 DEFAULT_CONTROLLERS = ["pure_pursuit", "mppi", "mppi_ukf"]
 
 
@@ -267,9 +335,10 @@ def _job(args):
     sc, name, seed, params, unc, laps, samples = args
     warnings.simplefilter("ignore")
     kind, gps = SCENARIOS[sc]
-    course = parking_lot_course()
+    track = make_track(seed) if ("cones" in gps or gps.get("on_cones")) else None
+    course = track["course"] if track else parking_lot_course()
     r = drive(make_controller(name, course, params, unc, samples, seed), course, kind, TRUE_CAR, gps,
-              duration_s=20.0 * laps, laps=laps, seed=seed, scenario=sc)
+              duration_s=20.0 * laps, laps=laps, seed=seed, scenario=sc, track=track)
     r.log = {k: r.log[k] for k in ("x", "y")} if seed == 1 else None
     return r
 
@@ -288,6 +357,7 @@ def summarize(results):
                      "off_track_worst_pct": 100 * float(np.max([r.off_track_frac for r in rs])),
                      "max_excess_m": float(np.max([r.max_excess_m for r in rs])),
                      "left_track": int(sum(r.left_track for r in rs)),
+                     "cones_hit": int(sum(r.cones_hit for r in rs)),
                      "max_lat_g": float(np.max([r.max_lat_g for r in rs])),
                      "max_slip_deg": float(np.max([r.max_sideslip_deg for r in rs])),
                      "pos_rmse_m": float(np.mean([r.pos_rmse_m for r in rs])),
@@ -298,13 +368,13 @@ def summarize(results):
 
 
 def format_summary(rows):
-    head = (f"{'scenario':>15} {'controller':>13} {'best lap':>8} {'v mean':>6} {'over line':>9} {'worst':>6} "
-            f"{'max over':>8} {'left':>4} {'lat g':>5} {'slip':>5} {'pos rmse':>8} {'in 2sig':>7} {'ms p50':>6} {'p99':>5}")
+    head = (f"{'scenario':>24} {'controller':>13} {'best lap':>8} {'v mean':>6} {'over line':>9} {'worst':>6} "
+            f"{'max over':>8} {'left':>4} {'hit':>3} {'lat g':>5} {'slip':>5} {'pos rmse':>8} {'in 2sig':>7} {'ms p50':>6} {'p99':>5}")
     out = [head, "-" * len(head)]
     for r in rows:
-        out.append(f"{r['scenario']:>15} {r['controller']:>13} {r['best_lap_s']:>7.2f}s {r['mean_speed']:>6.2f} "
+        out.append(f"{r['scenario']:>24} {r['controller']:>13} {r['best_lap_s']:>7.2f}s {r['mean_speed']:>6.2f} "
                    f"{r['off_track_pct']:>8.1f}% {r['off_track_worst_pct']:>5.1f}% {r['max_excess_m']:>7.2f}m "
-                   f"{r['left_track']:>4} {r['max_lat_g']:>5.2f} {r['max_slip_deg']:>4.1f}d {r['pos_rmse_m']:>7.2f}m "
+                   f"{r['left_track']:>4} {r['cones_hit']:>3} {r['max_lat_g']:>5.2f} {r['max_slip_deg']:>4.1f}d {r['pos_rmse_m']:>7.2f}m "
                    f"{r['pos_in_2sigma_pct']:>6.0f}% {r['compute_ms_p50']:>6.1f} {r['compute_ms_p99']:>5.1f}")
     return "\n".join(out)
 
@@ -318,11 +388,17 @@ def main(argv=None):
     ap.add_argument("--jobs", type=int, default=0, help="worker processes (default: CPU count)")
     ap.add_argument("--plot", help="save driven paths (seed 1) to this PNG")
     ap.add_argument("--json", help="save the summary rows to this JSON file")
+    ap.add_argument("--export", help="write a replay (first scenario, seed 1, every chosen controller) and "
+                                     "exit: .json for viewer/sim_viewer.html, or .html for a self-contained page")
     args = ap.parse_args(argv)
     warnings.simplefilter("ignore")
 
     laps, samples, seeds = (2, 400, 1) if args.quick else (4, 1000, args.seeds)
     scenarios = args.scenario or list(SCENARIOS)
+    if args.export:
+        export_replay(args.export, scenarios[0], args.controller or DEFAULT_CONTROLLERS, laps=laps,
+                      samples=samples)
+        return 0
     ident = {}
     for kind in sorted({SCENARIOS[s][0] for s in scenarios}):
         t0 = time.time()
@@ -348,6 +424,58 @@ def main(argv=None):
     if args.plot:
         plot(parking_lot_course(), [r for r in results if r.log is not None], args.plot)
     return 0
+
+
+def _xy(a, nd=2):
+    return [[round(float(x), nd), round(float(y), nd)] for x, y in a]
+
+
+def export_replay(path, scenario, controllers, seed=1, laps=3, samples=1000, record_hz=20.0):
+    """One scenario, one track and seed, every controller: geometry + frames for the web viewer."""
+    import json
+    from concurrent.futures import ProcessPoolExecutor
+    warnings.simplefilter("ignore")
+    kind, gps = SCENARIOS[scenario]
+    params, unc, _ = identify(kind, TRUE_CAR, seed=1)
+    with ProcessPoolExecutor(len(controllers)) as ex:
+        runs = list(ex.map(_replay_job, [(scenario, c, seed, params, unc, laps, samples, record_hz) for c in controllers]))
+    track = make_track(seed) if ("cones" in gps or gps.get("on_cones")) else None
+    course = track["course"] if track else parking_lot_course()
+    eL, eR = track["truth_edges"] if track else (course.e_left, course.e_right)
+    out = {"scenario": scenario, "seed": seed, "gps": {k: v for k, v in gps.items() if not isinstance(v, dict)},
+           "outage": gps.get("float"), "cam": gps.get("cones"), "car_half_width": CAR_HALF_WIDTH,
+           "course": {"center": _xy(course.xy[::4]),
+                      "left": _xy((course.xy + course.e_left[:, None] * course.normal)[::4]),
+                      "right": _xy((course.xy + course.e_right[:, None] * course.normal)[::4]),
+                      "left_true": _xy((course.xy + eL[:, None] * course.normal)[::4]),
+                      "right_true": _xy((course.xy + eR[:, None] * course.normal)[::4])},
+           "cones": None, "runs": runs}
+    if track:
+        out["cones"] = {"true": _xy(track["true"].xy, 3), "map": _xy(track["map"].xy, 3),
+                        "side": track["true"].side.tolist(), "survey_sd": float(track["map"].sd[0])}
+    text = json.dumps(out, separators=(",", ":"))
+    if path.endswith(".html"):  # self-contained page: the viewer with this replay embedded
+        import os
+        tpl = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "viewer", "sim_viewer.html")).read()
+        slot = '<script type="application/json" id="replay"></script>'
+        page = tpl.replace(slot, slot.replace("></", ">" + text.replace("</", "<\\/") + "</"))
+        text = '<!doctype html>\n<meta charset="utf-8">\n<meta name="viewport" content="width=device-width, initial-scale=1">\n' + page
+    with open(path, "w") as f:
+        f.write(text)
+    print(f"wrote {path}: {scenario}, {', '.join(r['controller'] for r in runs)}", file=sys.stderr)
+
+
+def _replay_job(a):
+    sc, name, seed, params, unc, laps, samples, record_hz = a
+    warnings.simplefilter("ignore")
+    kind, gps = SCENARIOS[sc]
+    track = make_track(seed) if ("cones" in gps or gps.get("on_cones")) else None
+    course = track["course"] if track else parking_lot_course()
+    r = drive(make_controller(name, course, params, unc, samples, seed), course, kind, TRUE_CAR, gps,
+              duration_s=20.0 * laps, laps=laps, seed=seed, scenario=sc, track=track, record_hz=record_hz)
+    return {"controller": r.controller, "laps": [round(x, 2) for x in r.laps], "best_lap": round(r.best_lap, 2),
+            "off_track_pct": round(100 * r.off_track_frac, 2), "cones_hit": r.cones_hit,
+            "pos_rmse_m": round(r.pos_rmse_m, 3), "left_track": r.left_track, "frames": r.frames}
 
 
 def plot(course, results, path):

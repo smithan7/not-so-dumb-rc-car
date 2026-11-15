@@ -8,3 +8,4 @@ __pycache__/
 venv/
 # scapy was committed as a bare gitlink; clone it separately if needed (pip install scapy is simpler)
 AutonomousCar/code/scapy/
+AutonomousCar/code/viewer/*.json

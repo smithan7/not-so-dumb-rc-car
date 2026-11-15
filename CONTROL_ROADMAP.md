@@ -6,7 +6,7 @@ control loop.
 
 Each stage below has gates that must pass before moving on. Most can be checked from logs with
 the existing tools (`sysid_log.py`, `sysid_model.py`, `closed_loop.py`).
-Status as of 2026-11-09: everything below has been rehearsed in simulation only.
+Status as of 2026-11-14: everything below has been rehearsed in simulation only.
 Hardware plan: RTK GPS + Intel RealSense L515 on the Xavier.
 
 ## Sensors: RTK GPS + RealSense L515 (decided 2026-11-09)
@@ -36,8 +36,8 @@ Hardware plan: RTK GPS + Intel RealSense L515 on the Xavier.
 - Spacing target: about 3–4 m per side on straights and tighter in corners (about 50–60 cones
   for the 92 m loop). Placement will be approximate. That is fine because **the survey is the
   truth**: the cone map, not the designed spline, defines the track edges the planner uses, and
-  the course is rebuilt from it. Check the surveyed map for gaps; a gap > 6 m on one side
-  means no landmarks there, so add a cone. Use tall cones (≥ 30 cm), not flat discs, so they
+  the course is rebuilt from it. Check the surveyed map for gaps: the sim ran clean with
+  10% of cones missing and gaps up to about 7.7 m, so add a cone wherever a gap exceeds 8 m. Use tall cones (≥ 30 cm), not flat discs, so they
   show above the asphalt at 3–8 m.
 
 ## The UKF ↔ MPPI pairing (chosen design, "level 1")
@@ -109,6 +109,58 @@ last filter refinements, so treat it as approximate:
 
 Even a weak measurement helps. Target **≤ 0.2 m at ≥ 30% of frames, ≥ 10 Hz**.
 
+## Cone course in simulation (`cones_*` scenarios, 3 seeds)
+
+How the cones are simulated (`cones.py`):
+- **Placement**: aimed at the design spacing, but each cone is off by 0.25 m across and 0.4 m along
+  the track, and 10% are never placed. That leaves 50–56 cones, gaps up to about 7.7 m, and pinch
+  points where the usable track narrows to about 1.6 m.
+- **Survey**: each cone is surveyed with 5 cm error, and the planner's track is rebuilt from the
+  survey. The true cones judge the run, and the car counts a cone as hit when its centre comes
+  within 0.32 m of one.
+- **Detections**: L515 RGB at 15 Hz and 70° field of view, out to 8 m, detected 90% of the time
+  near and 60% at 8 m. Range error is 5 cm + 3% of the range. There is an unmodelled 0.5° camera
+  yaw error, 0.5% of cones get the wrong colour, and 5% of frames contain a false detection.
+- **Cone position uncertainty is used twice**:
+  - The UKF adds each mapped cone's survey covariance to the measurement noise. It is inflated
+    ×4, because the same cone, and so the same survey error, is seen in many frames in a row.
+  - MPPI adds the survey error to the margin: the margin is z·√(σ_e² + σ_survey²).
+
+| scenario | pure pursuit | MPPI (point estimate) | MPPI + UKF |
+|---|---|---|---|
+| RTK, fixed-width design track (reference) | 11.44 s | 10.17 s, 0.3% over | 10.38 s, 0% |
+| cones + RTK | 11.82 s, 0 hits | 10.31 s, **2 hits** | **10.73 s, 0 hits** |
+| cones + RTK with float dropouts | 11.82 s, 0 hits | 10.55 s, **4 hits** | **10.73 s, 0 hits** |
+| cones + **plain GPS** (±0.5 m, 0.3 m bias) | 11.83 s, 0 hits | 10.37 s, **6 hits** | **10.50 s, 0 hits** |
+| cones placed but not detected, RTK dropouts | **spun**, 1 hit | 10.53 s, **20 hits** | 11.39 s, 0 hits |
+
+What this says:
+- **Cone landmarks make plain GPS as good as RTK.** Position error drops from 0.33 m to 0.06 m,
+  and MPPI + UKF laps within noise of the RTK runs. RTK becomes a backup and a survey tool, not
+  a requirement for pace. It is still worth having, because it covers stretches with no cones in
+  view and it is how the cones get surveyed.
+- Rough placement costs about 0.35 s a lap against the ideal fixed-width track: the pinch points
+  slow everyone. Placing cones more carefully buys back pace, not safety.
+- Survey error matters more than placement error. In a sweep, 15 cm survey error instead of 5 cm
+  cost about 0.8 s a lap, with still no hits, because the margin grows. Survey carefully: put
+  the pole at each cone's centre, with RTK fixed.
+- In the gating test, a detection 0.6 m from a mapped cone still passed the innovation gate while
+  the car was parked and its heading uncertain. The 0.8 m case is rejected. So wrong
+  associations are possible near the start and with cones closer together than about 1.5 m.
+  Watch the association log in gate B.
+- The viewer (below) shows all of this per frame.
+
+## Web replay viewer
+
+```sh
+cd AutonomousCar/code
+python closed_loop.py --scenario cones_rtk_outage --export replay.html   # open in a browser
+python closed_loop.py --scenario cones_rtk --export replay.json           # or load into viewer/sim_viewer.html
+```
+It shows the true and surveyed cones, the truth and planner edges, every controller's car, the
+selected car's UKF estimate with its 2σ ellipse, MPPI samples and plan, cone detections and the
+RTK float periods. Telemetry and lap times sit alongside, with a scrubber below.
+
 ## Stages and gates
 
 ### Stage 0: system ID on the real car → gate A
@@ -132,7 +184,11 @@ Run the designed passes (`sysid_maneuvers.py`) with `sysid_logger.py`, then fit.
       paint lines. Range error ≤ 0.2 m at 3 m and ≤ 0.4 m at 6 m against a tape measure. Record
       both the L515 depth and the ground-plane range, and note how often depth returns in sun.
       At least one cone in view in ≥ 30% of frames around the lap.
-- [ ] Cone map: every cone surveyed with the RTK rover (fixed). Re-survey after any cone is hit.
+- [ ] Cone map: every cone surveyed with the RTK rover (fixed), pole at the cone centre,
+      survey error ≤ 5 cm (re-survey a few cones to check). No gap over 8 m on either side.
+      Re-survey after any cone is hit.
+- [ ] Cone association, replayed offline on a hand-driven lap: ≥ 95% of detections associate
+      and pass the gate, and no wrong associations when checked by hand against the video.
 - [ ] Extrinsics: L515 pose on the car measured (lever arm and yaw). A 1° yaw error is 5 cm
       at 3 m.
 - [ ] UKF replayed offline on a hand-driven log: GPS innovation NIS mean between 1.5 and 3
@@ -186,7 +242,9 @@ lateral-acceleration cap.
 - `course.py`: course geometry with a fast (s, e) lookup grid and speed profile.
 - `vehicle_dynamics.py`: batched sysid model, tire-model plant, `ParamUncertainty`.
 - `state_estimator.py`: the UKF (gyro, encoder, lagged GPS with rollback, fix-mode-aware GPS bias,
-  L515 lateral offset).
+  L515 lateral offset, cone range/bearing landmarks with survey covariance and gating).
+- `cones.py`: cone placement, survey, camera detections, and the planner course built from the survey.
+- `viewer/sim_viewer.html`: the web replay viewer (`closed_loop.py --export`).
 - `controllers.py`: `PurePursuit`, `MPPI`, `DelayCompensator`.
 - `closed_loop.py`: identify → drive study; `--quick`, `--plot`, `--json`.
 - `tests/test_control.py`.
