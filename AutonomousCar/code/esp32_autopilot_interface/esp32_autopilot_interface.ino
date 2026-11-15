@@ -2,417 +2,252 @@
 ESP32 autopilot interface: car-side firmware between the RC receiver ("Steve"), the Jetson
 Xavier NX ("Xavier"), the steering servo / ESC, and the driveshaft hall sensor.
 Host side: smithan7/ROS_nsd_rc_car catkin_ws/src/esp32_interface/scripts/esp32_node.py
+(protocol v2 - needs the matching esp32_node / esp32_protocol.py).
 
-Imported unchanged (apart from this comment) from the local Arduino folder
-esp32_autopilot_interace/esp32_autopilot_interace.ino; it was never in git. Two variants there,
-_w_esp32pwm and _testing_led_lib_for_servo, differ only in the PWM output library.
+Who drives, and every failsafe decision, is in failsafe.h (unit-tested on a PC:
+AutonomousCar/code/tests/test_esp32_failsafe.py). This file is only the hardware around it.
 
-Protocol (115200 baud)
-  PC -> ESP32:  C,<steer_us>,<speed_us>,<(steer+speed)%1000>
-  ESP32 -> PC (~20 Hz):
-    C,<ms since Steve>,<ms since Xavier>,<cmd_status_flag>,<steve_cntrl_us>,<steve_speed_us>,
-      <steve_steer_us>,<xavier_status_flag>,<xavier_speed_us>,<xavier_steer_us>,
-      <hall_edge_time_us>,<hall_dt_us>,$
-  Receiver channel 3 > 1500 us: human (Steve) has control; otherwise Xavier's commands are output,
-  clamped to 1300..1700 us. Hall sensor: one rising edge per driveshaft revolution.
+Protocol v2, SERIAL_BAUD
+  Jetson -> ESP32   C,<seq>,<steer_us>,<speed_us>,<(seq+steer+speed)%1000>\n
+  ESP32 -> Jetson, immediately after each accepted command (timestamp echo for latency):
+                    A,<seq>,<rx_us>,<mode>,<out_speed_us>,<out_steer_us>,$
+  ESP32 -> Jetson, every STATUS_PERIOD_MS:
+                    S,<now_us>,<mode>,<armed>,<rc_age_ms>,<jetson_age_ms>,<rc_ch3_us>,
+                      <rc_speed_us>,<rc_steer_us>,<jetson_seq>,<jetson_speed_us>,
+                      <jetson_steer_us>,<out_speed_us>,<out_steer_us>,<hall_count>,
+                      <hall_last_edge_us>,<hall_dt_us>,<bad_cmds>,$
+  *_us times are this ESP32's micros() (wraps every ~71.6 min); ages are -1 if never seen.
+  out_* is what is written to the servo/ESC (after clamping/failsafe); it reaches the
+  actuators at their next PWM frame (0-20 ms at SERVO_HZ = 50).
+  Modes: 0 manual, 1 auto, -1 no receiver, -2 no Jetson, -3 auto not armed (see failsafe.h).
 
-KNOWN ISSUES - fix before autonomous driving on the 6S car:
-  1. Xavier timeout never triggers: `if(cmd_loop_time - last_xavier_time)` is true for any
-     nonzero value, so a dead Jetson leaves its last command applied indefinitely.
-  2. steve_interval = 20000 ms: losing the receiver keeps the last command for 20 s.
-  3. BRAKE_CMD = 1500 is ESC neutral (coast), not brake.
-  Also: no millis() stamp on the status line (sysid time alignment), hall_dt is not reset when
-  the driveshaft stops, and ISR variables are shared across tasks without a critical section.
+History: imported 2026-11 from the local Arduino folder (esp32_autopilot_interace.ino, never in
+git), then rewritten to fix: the Jetson timeout never firing; a 20 s receiver-loss timeout;
+"brake" that was neutral; no device timestamps; 10-bit PWM output (~20 us throttle steps);
+ISR data shared without critical sections; unframed serial input.
+
+BENCH CHECKS before driving (wheels off the ground):
+  - receiver failsafe: switch the transmitter off in MANUAL and in AUTO; mode must go to -1 (or
+    -2/-3) and the throttle to neutral/brake. If the receiver keeps outputting pulses with ch3
+    low on signal loss, the ESP32 cannot tell - set the receiver failsafe so it does not.
+  - pins / channels below, and that brake_us (failsafe.h) brakes rather than reverses.
 */
 
 #include <ESP32Servo.h>
 
-volatile long steve_speed_rise_time = 0;
-volatile bool good_speed_rise = false;
-volatile long steve_steer_rise_time = 0;
-volatile bool good_steer_rise = false;
-volatile long steve_cntrl_rise_time = 0;
-volatile bool good_cntrl_rise = false;
+#include "failsafe.h"
 
-int cmd_status_flag = 0;
-//  0 : Good, Steve has control
-//  1 : Good, Xavier has control
-// -1 : Bad, have not heard from Steve in a while
-// -2 : Bad, have not heard from Xavier in a while
-
-int xavier_status_flag = 0;
-//  0 : Good connection/msgs
-// -1 : bad serial  message
-
-//define the pins and variables
-volatile long cmdStartTime = 0;
-volatile long speedStartTime = 0;
-volatile long steerStartTime = 0;
-volatile bool newCmd = false;
-volatile bool newSpeed = false;
-volatile bool newSteer = false;
-//volatile long pwm_frame_length = 10957; // Old RC Receiver
-volatile long pwm_frame_length = 5550; // New RC Receiver - 5450
-
-long cmd_loop_time = -1;
-long status_loop_time = -1;
-
-volatile int steve_cntrl_cmd = 0;
-volatile int steve_speed_cmd = 0;
-volatile int steve_steer_cmd = 0;
-long last_steve_time = -10000000;
-long steve_interval = 20000;
-
-long ir_current_time = micros();
-long ir_last_time = micros();
-int ir_high = -1;
-long ir_dt = -1;
-
-long he_current_time = micros();
-long he_last_time = micros();
-long he_dt = -1;
-
-int xavier_steer_cmd = 1500;
-int xavier_speed_cmd = 1500;
-long last_xavier_time = -10000000;
-long xavier_interval = 30;
-int min_speed = 1300;
-int max_speed = 1700;
-int min_steer = 1300;
-int max_steer = 1700;
-
-int BRAKE_CMD = 1500; // cmd I sent to throttle to come to a stop - assume we should hold current steering command
-
-Servo steer_servo;
-Servo speed_servo;
-
-// This is what we actually wired up
-//#define IR_Sensor_Pin 21
+// ---- wiring (unchanged from the original sketch) ----
 #define HE_Sensor_Pin 21
 #define SpeedPinIn 19
 #define SteerPinIn 18
-#define CmdPinIn 17
+#define CmdPinIn 17  // receiver ch3: > 1500 us = human has control
 #define SpeedPinOut 16
 #define SteerPinOut 4
 
+const unsigned long SERIAL_BAUD = 460800;   // 115200 was ~65% busy at these line rates
+const uint32_t STATUS_PERIOD_MS = 20;       // 50 Hz status
+const int SERVO_HZ = 50;                    // output frame rate (receiver itself runs ~180 Hz)
+const uint32_t PWM_FRAME_US = 5550;         // receiver frame period (new receiver)
+const uint32_t PWM_FRAME_TOL_US = 100;
+const uint32_t PULSE_MIN_US = 900, PULSE_MAX_US = 2100;
+const uint32_t HALL_MIN_DT_US = 300;        // debounce: faster than ~3300 driveshaft rev/s is noise
 
-int checksum_modulator = 1000;
+car::Config cfg;
+car::Arbiter arbiter(cfg);
+Servo steer_servo;
+Servo speed_servo;
+
+// ---- ISR state (guarded by mux) ----
+portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED;
+
+struct PulseChannel {
+  uint8_t pin;
+  uint32_t rise_us;
+  bool good_rise;
+  int width_us;
+  uint32_t last_valid_ms;
+  bool seen;
+};
+volatile PulseChannel ch_speed = {SpeedPinIn, 0, false, 1500, 0, false};
+volatile PulseChannel ch_steer = {SteerPinIn, 0, false, 1500, 0, false};
+volatile PulseChannel ch_cmd = {CmdPinIn, 0, false, 0, 0, false};
+
+volatile uint32_t hall_count = 0;
+volatile uint32_t hall_last_us = 0;
+volatile uint32_t hall_last_ms = 0;
+volatile uint32_t hall_dt_us = 0;
+
+static inline bool IRAM_ATTR pin_high(uint8_t pin) { return (REG_READ(GPIO_IN_REG) >> pin) & 1; }
+
+static void IRAM_ATTR pulse_edge(volatile PulseChannel& ch) {
+  const uint32_t now = micros();
+  portENTER_CRITICAL_ISR(&mux);
+  if (pin_high(ch.pin)) {
+    const uint32_t period = now - ch.rise_us;
+    ch.good_rise = (period > PWM_FRAME_US - PWM_FRAME_TOL_US) && (period < PWM_FRAME_US + PWM_FRAME_TOL_US);
+    ch.rise_us = now;
+  } else {
+    const uint32_t w = now - ch.rise_us;
+    if (ch.good_rise && w >= PULSE_MIN_US && w <= PULSE_MAX_US) {
+      ch.width_us = (int)w;
+      ch.last_valid_ms = millis();
+      ch.seen = true;
+    }
+  }
+  portEXIT_CRITICAL_ISR(&mux);
+}
+void IRAM_ATTR speed_isr() { pulse_edge(ch_speed); }
+void IRAM_ATTR steer_isr() { pulse_edge(ch_steer); }
+void IRAM_ATTR cmd_isr() { pulse_edge(ch_cmd); }
+
+void IRAM_ATTR hall_isr() {
+  const uint32_t now = micros();
+  portENTER_CRITICAL_ISR(&mux);
+  const uint32_t dt = now - hall_last_us;
+  if (hall_count == 0 || dt >= HALL_MIN_DT_US) {
+    hall_dt_us = hall_count == 0 ? 0 : dt;
+    hall_last_us = now;
+    hall_last_ms = millis();
+    hall_count = hall_count + 1;
+  }
+  portEXIT_CRITICAL_ISR(&mux);
+}
+
+// ---- Jetson command state (loop only) ----
+bool jetson_seen = false;
+uint32_t jetson_last_ms = 0;
+uint32_t jetson_seq = 0;
+int jetson_speed_us = 1500, jetson_steer_us = 1500;
+uint32_t bad_cmds = 0;
+
+char line_buf[64];
+size_t line_len = 0;
+bool line_overflow = false;
+
+// Read whatever has arrived; returns true (and fills ack_*) when a valid command was accepted.
+bool read_commands(uint32_t* ack_seq, uint32_t* ack_rx_us) {
+  bool accepted = false;
+  while (Serial.available()) {
+    const char c = (char)Serial.read();
+    if (c != '\n') {
+      if (line_len < sizeof(line_buf) - 1) {
+        line_buf[line_len++] = c;
+      } else {
+        line_overflow = true;
+      }
+      continue;
+    }
+    line_buf[line_len] = '\0';
+    car::Command cmd;
+    if (!line_overflow && car::parse_command(line_buf, &cmd)) {
+      jetson_seen = true;
+      jetson_last_ms = millis();
+      jetson_seq = cmd.seq;
+      jetson_speed_us = cmd.speed_us;
+      jetson_steer_us = cmd.steer_us;
+      *ack_seq = cmd.seq;
+      *ack_rx_us = micros();
+      accepted = true;
+    } else if (line_len > 0) {
+      bad_cmds++;
+    }
+    line_len = 0;
+    line_overflow = false;
+  }
+  return accepted;
+}
+
+static long age_ms(bool seen, uint32_t last_ms, uint32_t now_ms) {
+  return seen ? (long)(uint32_t)(now_ms - last_ms) : -1L;
+}
 
 void setup() {
-  //Start Serial Output
-  Serial.begin(115200); 
+  Serial.setTxBufferSize(1024);  // a status line never blocks the control loop
+  Serial.begin(SERIAL_BAUD);
   ESP32PWM::allocateTimer(0);
   ESP32PWM::allocateTimer(1);
   ESP32PWM::allocateTimer(2);
   ESP32PWM::allocateTimer(3);
+  speed_servo.setPeriodHertz(SERVO_HZ);
+  steer_servo.setPeriodHertz(SERVO_HZ);
+  speed_servo.attach(SpeedPinOut, 900, 2100);
+  steer_servo.attach(SteerPinOut, 900, 2100);
+  // ESP32Servo's default 10-bit timer = ~20 us steps at 50 Hz; 16 bits = ~0.3 us. Must come
+  // after attach() (which resets the width), and must be followed by writeMicroseconds():
+  // the library rescales the current pulse wrongly on a width change (ESP32Servo 3.2.1).
+  speed_servo.setTimerWidth(16);
+  steer_servo.setTimerWidth(16);
+  speed_servo.writeMicroseconds(cfg.neutral_us);
+  steer_servo.writeMicroseconds(cfg.steer_center_us);
 
-  // initialize PWM stuff
-  speed_servo.setPeriodHertz(50);
-  speed_servo.setResolution(10);
-  speed_servo.attach(SpeedPinOut);
-  steer_servo.setPeriodHertz(50);
-  steer_servo.attach(SteerPinOut);
-
-  attachInterrupt(digitalPinToInterrupt(SpeedPinIn), speedPulseTimer,CHANGE);
-  attachInterrupt(digitalPinToInterrupt(SteerPinIn), steerPulseTimer,CHANGE);
-  attachInterrupt(digitalPinToInterrupt(CmdPinIn),   cmdPulseTimer,  CHANGE);
-//  attachInterrupt(digitalPinToInterrupt(IR_Sensor_Pin),   irPulseTimer,  CHANGE);
-  attachInterrupt(digitalPinToInterrupt(HE_Sensor_Pin),   hallEffectPulseTimer,  RISING);
-
-//  Serial.println("Nano PWM Interface");
-//  Serial.println("P,Time (ms), Steer (pwm), Speed (pwm), (Steer+Speed)%255, $"); 
-
-  xTaskCreatePinnedToCore(
-              pwm_pub_task,       //Function to implement the task 
-              "PMW_Pub_Thread", //Name of the task
-              6000,       //Stack size in words 
-              NULL,       //Task input parameter 
-              0,          //Priority of the task - might want to bump this to 2 to give priority: https://www.freertos.org/RTOS-task-priority.html
-              NULL,       //Task handle.
-              1);         //Core where the task should run 
-
-  xTaskCreatePinnedToCore(
-              status_pub_task,       //Function to implement the task 
-              "Status_Pub_Thread", //Name of the task
-              6000,       //Stack size in words 
-              NULL,       //Task input parameter 
-              0,          //Priority of the task - this is good at 0.
-              NULL,       //Task handle.
-              1);         //Core where the task should run 
-
+  pinMode(SpeedPinIn, INPUT);
+  pinMode(SteerPinIn, INPUT);
+  pinMode(CmdPinIn, INPUT);
+  pinMode(HE_Sensor_Pin, INPUT);
+  attachInterrupt(digitalPinToInterrupt(SpeedPinIn), speed_isr, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(SteerPinIn), steer_isr, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(CmdPinIn), cmd_isr, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(HE_Sensor_Pin), hall_isr, RISING);
 }
 
 void loop() {
-// get the commands from the xavier
-  String cmds_in = "";
-  char character;
-  while(Serial.available()) {
-     character = Serial.read();
-     cmds_in.concat(character);
-     delayMicroseconds(100); // 0.001 seconds to ensure there is data in the buffer
+  static uint32_t last_status_ms = 0;
+  static int written_speed = -1, written_steer = -1;
+
+  uint32_t ack_seq = 0, ack_rx_us = 0;
+  const bool ack = read_commands(&ack_seq, &ack_rx_us);
+
+  // snapshot the ISR state
+  car::Inputs in;
+  uint32_t h_count, h_last_us, h_dt;
+  int ch3;
+  portENTER_CRITICAL(&mux);
+  const uint32_t now_ms = millis();
+  in.now_ms = now_ms;
+  in.rc_seen = ch_speed.seen && ch_steer.seen && ch_cmd.seen;
+  // the receiver is only as fresh as its stalest channel
+  uint32_t oldest = ch_speed.last_valid_ms;
+  if ((uint32_t)(now_ms - ch_steer.last_valid_ms) > (uint32_t)(now_ms - oldest)) oldest = ch_steer.last_valid_ms;
+  if ((uint32_t)(now_ms - ch_cmd.last_valid_ms) > (uint32_t)(now_ms - oldest)) oldest = ch_cmd.last_valid_ms;
+  in.rc_last_ms = oldest;
+  in.rc_speed_us = ch_speed.width_us;
+  in.rc_steer_us = ch_steer.width_us;
+  ch3 = ch_cmd.width_us;
+  in.hall_seen = hall_count > 0;
+  in.hall_last_edge_ms = hall_last_ms;
+  h_count = hall_count;
+  h_last_us = hall_last_us;
+  h_dt = hall_dt_us;
+  portEXIT_CRITICAL(&mux);
+  in.rc_ch3_us = ch3;
+  in.jetson_seen = jetson_seen;
+  in.jetson_last_ms = jetson_last_ms;
+  in.jetson_speed_us = jetson_speed_us;
+  in.jetson_steer_us = jetson_steer_us;
+
+  const car::Output out = arbiter.update(in);
+  if (out.speed_us != written_speed) {
+    speed_servo.writeMicroseconds(out.speed_us);
+    written_speed = out.speed_us;
   }
-  // parse the commands from the xavier
-  if (cmds_in != "") {
-//      Serial.print("Received: ");
-//      Serial.println(cmds_in);
-    int ind1 = cmds_in.indexOf(',');  //finds location of first ,
-    String header = cmds_in.substring(0, ind1);   //captures first data String
-//      Serial.print("Header: ");
-//      Serial.println(header);
-    if(header.compareTo("C") ==0){//&& tail.compareTo("$") ==0){
-      int ind2 = cmds_in.indexOf(',', ind1+1 );   //finds location of second ,
-      int steer_in = cmds_in.substring(ind1+1, ind2+1).toInt();   //captures second data String
-//        Serial.print("Steer_in: ");
-//        Serial.println(steer_in);
-      int ind3 = cmds_in.indexOf(',', ind2+1 );
-      int speed_in = cmds_in.substring(ind2+1, ind3+1).toInt();
-//        Serial.print("Speed_in: ");
-//        Serial.println(speed_in);
-      int ind4 = cmds_in.indexOf(',', ind3+1 );
-      int checksum = cmds_in.substring(ind3+1).toInt();
-//        Serial.print("Checksum: ");
-//        Serial.println(checksum);
-      if((steer_in + speed_in) % checksum_modulator == checksum){
-//          Serial.println("Checksum worked");
-        if(steer_in > 900 && steer_in <= 2100){
-          xavier_steer_cmd = steer_in;
-        }
-        if(speed_in >= 900 && speed_in <= 2100){
-          xavier_speed_cmd = speed_in;
-        }        
-        last_xavier_time = millis();
-        xavier_status_flag = 0;
-      }
-      else{
-//        Serial.print("Checksum Failed: ");
-//        Serial.println((steer_in + speed_in) % checksum_modulator);
-        xavier_status_flag = -1;
-      }
-    }
+  if (out.steer_us != written_steer) {
+    steer_servo.writeMicroseconds(out.steer_us);
+    written_steer = out.steer_us;
   }
 
-  if(millis() - last_xavier_time > xavier_interval){
-    xavier_status_flag = -1;
+  if (ack) {
+    Serial.printf("A,%lu,%lu,%d,%d,%d,$\n", (unsigned long)ack_seq, (unsigned long)ack_rx_us, out.mode,
+                  out.speed_us, out.steer_us);
   }
-  
-  delay(20);
+  if ((uint32_t)(now_ms - last_status_ms) >= STATUS_PERIOD_MS) {
+    last_status_ms = now_ms;
+    Serial.printf("S,%lu,%d,%d,%ld,%ld,%d,%d,%d,%lu,%d,%d,%d,%d,%lu,%lu,%lu,%lu,$\n",
+                  (unsigned long)micros(), out.mode, out.armed ? 1 : 0,
+                  age_ms(in.rc_seen, in.rc_last_ms, now_ms), age_ms(jetson_seen, jetson_last_ms, now_ms),
+                  ch3, in.rc_speed_us, in.rc_steer_us, (unsigned long)jetson_seq, jetson_speed_us,
+                  jetson_steer_us, out.speed_us, out.steer_us, (unsigned long)h_count,
+                  (unsigned long)h_last_us, (unsigned long)h_dt, (unsigned long)bad_cmds);
+  }
+  delay(1);
 }
-
-float clampFloat(float v, const float &minV, const float &maxV){
-  if(v < minV){
-    return minV;
-  }
-  if(v > maxV){
-      return maxV;
-  }
-  return v;
-}
-
-int clampInt(int v, const int &minV, const int &maxV){
-  if(v < minV){
-    return minV;
-  }
-  if(v > maxV){
-      return maxV;
-  }
-  return v;
-}
-
-void hallEffectPulseTimer(){
-   //measure the time between rising edge interrupts - which is one full rotation
-  he_current_time = micros();
-  he_dt = he_current_time - he_last_time;
-  he_last_time = he_current_time;
-}
-
-void cmdPulseTimer(){
-  //measure the time between interrupts
-  long currentTime = micros();
-  // begin new
-  if (digitalRead(CmdPinIn) == HIGH){
-    // this is the rising edge - so we just went up. These should happen at the same time unless it is noise
-    long d_rise = currentTime - steve_cntrl_rise_time;
-    if( (abs(d_rise - pwm_frame_length) > 100)){
-      // bad measurement
-      good_cntrl_rise = false;
-    }
-    else{
-      // good measurement
-      good_cntrl_rise = true;
-    }
-    steve_cntrl_rise_time = currentTime;
-  }
-  else{
-    // this is the fall time - or the measurement
-    long dt = currentTime - steve_cntrl_rise_time;
-    if (dt >= 1000 && dt <= 2000 && good_cntrl_rise){
-      steve_cntrl_cmd = dt;
-      newCmd = true;
-    }
-  } 
-}
-
-void speedPulseTimer(){
-  //measure the time between interrupts
-  long currentTime = micros();
-  // begin new
-  if (digitalRead(SpeedPinIn) == HIGH){
-    // this is the rising edge - so we just went up. These should happen at the same time unless it is noise
-    long d_rise = currentTime - steve_speed_rise_time;
-//    Serial.println(d_rise);
-    if( (abs(d_rise - pwm_frame_length) > 100)){
-      // bad measurement
-//      Serial.print("bad measurement: ");
-//      Serial.println(d_rise);
-      good_speed_rise = false;
-    }
-    else{
-      // good measurement
-      good_speed_rise = true;
-    }
-    steve_speed_rise_time = currentTime;
-  }
-  else{
-    // this is the fall time - or the measurement
-    long dt = currentTime - steve_speed_rise_time;
-    if (dt >= 1000 && dt <= 2000 && good_speed_rise){
-      steve_speed_cmd = dt;
-      newSpeed = true;
-    }
-  }    
-}
-
-void steerPulseTimer(){
-  //measure the time between interrupts
-  long currentTime = micros();
-  // begin new
-  if (digitalRead(SteerPinIn) == HIGH){
-    // this is the rising edge - so we just went up. These should happen at the same time unless it is noise
-    long d_rise = currentTime - steve_steer_rise_time;
-    if( (abs(d_rise - pwm_frame_length) > 100)){
-      // bad measurement
-      good_steer_rise = false;
-    }
-    else{
-      // good measurement
-      good_steer_rise = true;
-    }
-    steve_steer_rise_time = currentTime;
-  }
-  else{
-    // this is the fall time - or the measurement
-    long dt = currentTime - steve_steer_rise_time;
-    if (dt >= 1000 && dt <= 2000 && good_steer_rise){
-      steve_steer_cmd = dt;
-      newSteer = true;
-    }
-  }  
-}
-
-void status_pub_task( void* ){
-  while(1){
-    status_loop_time = millis();
-    Serial.print("C,");
-    Serial.print(status_loop_time - last_steve_time);
-    Serial.print(",");
-    Serial.print(status_loop_time - last_xavier_time);
-    Serial.print(",");
-    Serial.print(cmd_status_flag);
-    Serial.print(",");
-    Serial.print(steve_cntrl_cmd);
-    Serial.print(",");
-    Serial.print(steve_speed_cmd);
-    Serial.print(",");
-    Serial.print(steve_steer_cmd);
-    Serial.print(",");
-    Serial.print(xavier_status_flag);
-    Serial.print(",");
-    Serial.print(xavier_speed_cmd);
-    Serial.print(",");
-    Serial.print(xavier_steer_cmd);
-    Serial.print(",");
-//    Serial.print(ir_current_time);
-//    Serial.print(",");
-//    Serial.print(ir_dt);
-//    Serial.print(",");
-//    Serial.print(ir_high);
-    Serial.print(he_current_time);
-    Serial.print(",");
-    Serial.print(he_dt);
-    Serial.println(",$");
-    delay(50);
-  }
-}
-
-void pwm_pub_task( void* ){
-  while(1){
-//    Serial.println("pwm_pub_task::in pwm_loop");
-    cmd_loop_time = millis();
-    // Check to see if I have heard from Steve
-    if(newSteer & newSpeed & newCmd){
-      last_steve_time = cmd_loop_time;
-      newSteer = false;
-      newSpeed = false;
-      newCmd = false;
-    }
-    // Just test servos actually work
-//    speed_servo.writeMicroseconds(xavier_speed_cmd);
-//    steer_servo.writeMicroseconds(xavier_steer_cmd);
-//    speed_servo.writeMicroseconds(steve_speed_cmd);
-//    steer_servo.writeMicroseconds(steve_steer_cmd);
-    
-    if(cmd_loop_time - last_steve_time < steve_interval){
-//      Serial.println("pwm_pub_task::in cmd loop");
-      // I have heard from Steve - continue, does Steve have cmd or do I?
-      if(steve_cntrl_cmd > 1500){
-//        Serial.println("pwm_pub_task::publishing steve's cmds");
-        // Steve has cmd - publish out his commands
-        cmd_status_flag = 0;
-        speed_servo.writeMicroseconds(steve_speed_cmd);
-        steer_servo.writeMicroseconds(steve_steer_cmd);
-      }
-      else{
-        // I have cmd - check to see if I have heard from the Xavier
-        if(cmd_loop_time - last_xavier_time){
-          // I have heard from the Xavier - publish the cmds
-//          Serial.println("pwm_pub_task::publishing Xavier's cmds");
-          cmd_status_flag = 1;
-          speed_servo.writeMicroseconds(clampInt(xavier_speed_cmd, min_speed, max_speed));
-          steer_servo.writeMicroseconds(clampInt(xavier_steer_cmd, min_steer, max_steer)); // it is discretized into bins of 20 - I add 11 toeven it out, seams to work well
-        }
-        else{
-          // I am asking Xavier to take control and I have not heard from the Xavier - apply brakes and set status flag to error
-          Serial.println("pwm_pub_task::have not heard from Xavier - not publishing Xavier's cmds");
-          cmd_status_flag = -2;
-          speed_servo.writeMicroseconds(BRAKE_CMD);
-        }
-      }
-    }
-    else{
-      // I am asking Steve to take control and I have not heard from Steve - apply brakes and set status flag to error
-//      Serial.println("pwm_pub_task::have not heard from Steve - not publishing steve's cmds");
-      cmd_status_flag = -1;
-      speed_servo.writeMicroseconds(BRAKE_CMD);
-    }
-//  delay(5);
-  }
-}
-
-//void irPulseTimer(){
-//  // key here is that EVERY change - up/down represents a 1/4 turn
-//  // so....
-//  // time for 1/4 turn = dt since last spike in seconds
-//  // estimated time for full turn = 4 * (dt since last spike) in seconds
-//  // estimated radians per second = 2*pi / (estimated time for full turn) 
-//  // I *think*  it will be better to do filtering on the xavier and just get the raw data out at ~100 Hz
-//  //measure the time between interrupts
-//  ir_current_time = micros();
-//  ir_dt = ir_current_time - ir_last_time;
-//  ir_last_time = ir_current_time;
-//  if (digitalRead(IR_Sensor_Pin) == HIGH){
-//    ir_high = 1;
-//  }
-//  else{
-//    ir_high = 0;
-//  } 
-//}

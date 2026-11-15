@@ -15,6 +15,8 @@ AutonomousCar/
     Track.py            track geometry, nearest-edge search, curvature speed profile
     data_collect_GUI*.py  Tk telemetry GUIs (serial / UDP)
     read_pwm/read_pwm.ino  Arduino/ESP32 RC-receiver PWM reader
+    esp32_autopilot_interface/  car-side ESP32 firmware: receiver/Jetson arbitration, failsafe,
+                        hall encoder, serial protocol v2 (failsafe.h is unit-tested on a PC)
     tests/              pytest suite for the models
     *.ipynb             experiments, calibration and optimization notebooks
   archived_code/        older experiments
