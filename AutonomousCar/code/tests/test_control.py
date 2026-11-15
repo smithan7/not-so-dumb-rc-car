@@ -175,3 +175,53 @@ def test_gps_fix_mode_change_resets_bias_state():
     ukf.update(5.0, "gps", (np.array([0.5, 0.0]), 0.3, 0.4))   # drops to float, jumps 0.5 m
     assert math.sqrt(ukf.P[6, 6]) > 0.2          # bias spread now float-sized (was 0.03)
     assert abs(ukf.z[IX]) < 0.1                   # the jump is blamed on the bias, not the car
+
+
+def test_course_from_cones_follows_the_survey_not_the_design():
+    import cones as CN
+    rng = np.random.default_rng(3)
+    design = parking_lot_course()
+    true = CN.layout_cones(design, rng)
+    surveyed = CN.survey(true, rng, sd=0.05)
+    course = CN.course_from_cones(design, surveyed)
+    eL, eR = CN.truth_edges(course, true)
+    assert len(true) > 45 and true.max_gap(design) < 8.0
+    assert np.std(course.e_left - eL) < 0.08            # planner edges = true edges up to survey error
+    assert course.edge_sd == pytest.approx(0.05)
+    assert np.all(course.e_left - course.e_right > 1.2)  # still drivable where scatter pinches it
+
+
+def test_cone_landmarks_remove_gps_bias_and_reject_outliers():
+    """Parked with a 0.5 m GPS bias: cone range/bearing pins the position; a false cone is gated."""
+    import cones as CN
+    rng = np.random.default_rng(4)
+    xy = np.array([[3.0, 1.5], [3.0, -1.5], [6.0, 1.5], [6.0, -1.5]])
+    cmap = CN.ConeMap(xy, np.array([1, -1, 1, -1]), np.full(4, 0.03))
+    cfg = dict(CN.CAMERA, p_false=0.0, p_wrong_side=0.0, mount_yaw_err_deg=0.0)
+    cam = CN.ConeCamera(cmap, rng, cfg)
+    ukf = initial_ukf(0, 0, 0, 0.0, gps_bias_sd=0.5, r_gps=0.3, cone_map=cmap, cone_cfg=cfg)
+    for k in range(1, 200):
+        t = k * 0.05
+        ukf.update(t, "gyro", 0.0)
+        ukf.update(t, "enc", 0.0)
+        if k % 2 == 0:
+            ukf.update(t, "gps", np.array([0.5, 0.4]))  # biased fix
+        for det in cam.frame(0.0, 0.0, 0.0):
+            ukf.update(t, "cone", det)
+    assert math.hypot(ukf.z[IX], ukf.z[IY]) < 0.1
+    used = ukf.cone_stats["used"]
+    assert ukf.update(10.0, "cone", (4.0, 0.0, 1)) is None  # nothing mapped there
+    # 0.8 m from the real cone at (3, 1.5): associates, but the innovation is far too large
+    d = np.array([3.0, 2.3]) - (0.25, 0.0)  # seen at (3, 2.3), camera 0.25 m ahead of the origin
+    assert ukf.update(10.0, "cone", (float(np.hypot(*d)), math.atan2(d[1], d[0]), 1)) is None
+    assert ukf.cone_stats["used"] == used and ukf.cone_stats["gated"] >= 1
+
+
+def test_closed_loop_on_cones_no_hits():
+    p = M.default_params(input_delay=0.04)
+    track = C.make_track(1)
+    ctl = C.make_controller("mppi_ukf", track["course"], p, None, samples=150, seed=0)
+    r = C.drive(ctl, track["course"], "kinematic", p, dict(C.GPS_RTK, cones=C.CONE_CAMERA), duration_s=30,
+                laps=1, seed=0, track=track, record_hz=10)
+    assert len(r.laps) == 1 and r.cones_hit == 0
+    assert r.cone_stats["used"] > 100 and r.frames and "roll" in r.frames[-1]

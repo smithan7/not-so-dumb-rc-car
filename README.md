@@ -71,8 +71,12 @@ the design, the results and the gates for moving each stage onto the real car.
 ```sh
 cd AutonomousCar/code
 python closed_loop.py --quick              # ~30 s smoke run
-python closed_loop.py --plot paths.png     # full study, 4 scenarios x 3 controllers x 3 seeds
+python closed_loop.py --plot paths.png     # full study: every scenario x 3 controllers x 3 seeds
+python closed_loop.py --scenario cones_rtk_outage --export replay.html   # web replay of one run
 ```
+
+The `cones_*` scenarios put the course on hand-placed cones (`cones.py`). The track is rebuilt from
+the RTK survey, and the car localizes against the surveyed cones.
 
 ## Tests
 

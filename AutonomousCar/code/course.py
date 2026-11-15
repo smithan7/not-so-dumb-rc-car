@@ -37,6 +37,10 @@ class Course:
         self.normal = np.column_stack([-self.tangent[:, 1], self.tangent[:, 0]])  # left
         self.width = float(width)
         self.ds = self.length / n
+        # edges as signed offsets per sample (+left); constant here, from the cone map in cones.py
+        self.e_left = np.full(n, self.width / 2)
+        self.e_right = np.full(n, -self.width / 2)
+        self.edge_sd = 0.0  # uncertainty of the edges themselves (cone survey error)
         self._tree = cKDTree(self.xy)
 
         # (s, e) lookup grid
@@ -72,9 +76,12 @@ class Course:
         e = np.where(off, 1e3, self._e_grid[ix, iy])
         return s, e
 
+    def index(self, s):
+        return np.round(np.asarray(s) / self.ds).astype(np.int64) % len(self.s)
+
     def at(self, s):
         """Centerline point, heading, curvature, normal at arc length s (nearest sample)."""
-        i = np.round(np.asarray(s) / self.ds).astype(np.int64) % len(self.s)
+        i = self.index(s)
         return self.xy[i], self.psi[i], self.kappa[i], self.normal[i]
 
     def wrap_ds(self, ds):
