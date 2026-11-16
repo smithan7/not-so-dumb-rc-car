@@ -60,7 +60,8 @@ const CHARTS = {
     { key: "rc_steer", label: "receiver", c: "s1" }, { key: "j_steer", label: "Jetson cmd", c: "s2" },
     { key: "out_steer", label: "output", c: "s3", w: 2 }] },
   spd: { el: "ch-spd", legend: "lg-spd", range: [0, 4], auto: true, series: [
-    { key: "speed", label: "encoder", c: "s3", w: 2 }, { key: "truth_v", label: "true (emulator)", c: "s4", dash: [4, 3] }] },
+    { key: "speed", label: "encoder m/s", c: "s3", w: 2 }, { key: "truth_v", label: "true (emulator)", c: "s4", dash: [4, 3] },
+    { key: "yaw", label: "yaw rate rad/s", c: "s1" }] },
   lnk: { el: "ch-lnk", legend: "lg-lnk", range: [0, 10], auto: true, series: [
     { key: "rtt", label: "round trip", c: "s3", w: 2 }, { key: "j_age", label: "Jetson cmd age", c: "s2", alpha: 0.45, w: 1 },
     { key: "rc_age", label: "receiver age", c: "s1" }] },
@@ -91,8 +92,14 @@ function drawChart(ch, tNow) {
   const pts = hist.filter((h) => h.t >= t0);
   let [lo, hi] = ch.range;
   if (ch.auto) {
-    for (const h of pts) for (const s of ch.series) { const v = h[s.key]; if (v !== null && v !== undefined && v > hi) hi = v; }
+    for (const h of pts) for (const s of ch.series) {
+      const v = h[s.key];
+      if (v === null || v === undefined) continue;
+      if (v > hi) hi = v;
+      if (v < lo) lo = v;
+    }
     hi = Math.ceil(hi * 1.1 * 10) / 10;
+    if (lo < 0) lo = Math.floor(lo * 1.1 * 10) / 10;
   }
   const step = ch.step || niceStep(hi - lo);
   const X = (t) => L + ((t - t0) / WINDOW_S) * (W - L - R);
@@ -230,6 +237,7 @@ function record(s) {
   }
   h.rtt = s.link.rtt_ms;
   h.truth_v = s.truth ? s.truth.v : null;
+  h.yaw = s.imu ? s.imu.yaw_rate : null;
   hist.push(h);
   while (hist.length && hist[0].t < s.t - KEEP_S) hist.shift();
   if (s.truth) {
@@ -290,7 +298,7 @@ jb.addEventListener("contextmenu", (e) => e.preventDefault());
 function passInfo() {
   const p = cfg && cfg.passes.find((q) => q.name === $("pass-select").value);
   if (!p) { $("pass-info").textContent = ""; return; }
-  $("pass-info").textContent = `${fmt(p.duration_s, 1)} s, up to ${p.max_throttle_us} µs` +
+  $("pass-info").textContent = (p.why ? p.why + ". " : "") + `${fmt(p.duration_s, 1)} s, up to ${p.max_throttle_us} µs` +
     (p.clamped ? ` (firmware clamps to ${cfg.limits.auto_speed_max_us})` : "") +
     `; prior model: top ${fmt(p.top_speed_mps, 1)} m/s, path ${fmt(p.extent_m[0], 0)} × ${fmt(p.extent_m[1], 0)} m.` +
     " The prior's speed gain is a placeholder - start with small custom steps.";
@@ -330,22 +338,88 @@ $("tx-center").onclick = () => {
 };
 $("sim-reset").onclick = () => { trail = []; post("/api/sim/reset"); };
 
+// ---------------------------------------------------------------- system ID
+let sysidSeen = null;
+function el(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; }
+function fmtVal(v) { return Math.abs(v) >= 1000 ? v.toFixed(1) : Number(v).toPrecision(4); }
+
+async function refreshPasses() {
+  cfg = await (await fetch("/api/config")).json();
+  const sel = $("pass-select"), keep = sel.value;
+  sel.replaceChildren();
+  const groups = [["suggested", "Suggested by system ID"], ["longitudinal", "Longitudinal (speed)"], ["lateral", "Lateral (steering)"]];
+  for (const [kind, label] of groups) {
+    const ps = cfg.passes.filter((q) => q.kind === kind);
+    if (!ps.length) continue;
+    const g = document.createElement("optgroup"); g.label = label;
+    for (const p of ps) { const o = document.createElement("option"); o.value = p.name; o.textContent = p.name; g.appendChild(o); }
+    sel.appendChild(g);
+  }
+  if ([...sel.options].some((o) => o.value === keep)) sel.value = keep;
+  passInfo();
+}
+
+function renderSysid(sy) {
+  const chip = $("sysid-state");
+  chip.textContent = { idle: "not run", running: "fitting…", done: "done", error: "error" }[sy.state] || sy.state;
+  chip.className = "chip" + (sy.state === "running" ? " st-pass" : "");
+  $("btn-sysid").disabled = sy.state === "running";
+  if (sy.state === "error") { say("system ID: " + sy.error, true); return; }
+  if (sy.state !== "done" || !sy.report) return;
+  const r = sy.report;
+  $("sysid-out").hidden = false;
+  const v = $("sy-verdict");
+  v.textContent = r.gate_pass ? "Gate A passed" : "Gate A not yet";
+  v.className = "verdict " + (r.gate_pass ? "pass" : "fail");
+  $("sy-data").textContent = `${r.pieces.length} piece(s) of driving` +
+    (r.rmse.speed !== null ? `, speed fit rmse ${r.rmse.speed.toFixed(3)} m/s` : "") +
+    (r.rmse.yaw !== null ? `, yaw rmse ${r.rmse.yaw.toFixed(3)} rad/s` : "") +
+    (r.notes.length ? ". " + r.notes.join("; ") : "") + ". * = gating. 1σ assumes white noise (optimistic).";
+  const tb = $("sy-gate").tBodies[0];
+  tb.replaceChildren(...r.gate.map((g) => {
+    const tr = el("tr", g.gating ? "gating" : "");
+    tr.append(el("td", "", g.param), el("td", "", fmtVal(g.value)), el("td", "", g.std_text), el("td", "", g.target_text),
+              el("td", g.ok ? "okmark" : "nomark", g.ok ? "✓" : "–"));
+    return tr;
+  }));
+  const checks = [];
+  for (const [kind, h] of Object.entries(r.holdout)) {
+    checks.push(h === null ? `hold-out ${kind}: needs ≥ 2 pieces of this kind`
+      : h.skipped ? `hold-out ${kind}: skipped`
+      : `hold-out ${kind}: rmse ${h.rmse.toFixed(3)} (limit ${h.limit}) ${h.ok ? "✓" : "–"}`);
+  }
+  for (const c of r.correlated) checks.push(`${c.a} / ${c.b} correlated ${c.corr.toFixed(3)}: not separable yet`);
+  $("sy-checks").replaceChildren(...checks.map((t) => el("li", "", t)));
+  $("sy-suggest").replaceChildren(...(r.suggestions.length ? r.suggestions.map((s) => {
+    const li = el("li");
+    const run = el("button", "small", "Run");
+    run.onclick = () => post("/api/pass/start", { name: s.name });
+    li.append(el("div", "name", `${s.name.replace("suggested: ", "")} (${Math.round(s.duration_s)} s) `), el("div", "why", s.why || ""), run);
+    return li;
+  }) : [el("li", "", "Nothing - every target is predicted to be met.")]));
+  $("sy-remaining").textContent = r.remaining_after_plan.length
+    ? `Still short after this plan: ${r.remaining_after_plan.join(", ")}. Refit after driving; if it stays short, the speed cap may be too low to excite it.` : "";
+}
+
+async function pollSysid(state) {
+  if (state === sysidSeen && state !== "running") return;
+  sysidSeen = state;
+  const sy = await (await fetch("/api/sysid")).json();
+  renderSysid(sy);
+  if (sy.state === "done") await refreshPasses();
+}
+$("btn-sysid").onclick = async () => {
+  const r = await post("/api/sysid/run", { max_speed_mps: +$("sy-speed").value, n: +$("sy-n").value });
+  if (r) { sysidSeen = null; pollSysid("running"); }
+};
+
 // ---------------------------------------------------------------- start
 async function init() {
   buildLegends();
   cfg = await (await fetch("/api/config")).json();
   $("sim-badge").hidden = !cfg.sim;
   $("sim-panel").hidden = !cfg.sim;
-  const sel = $("pass-select");
-  for (const kind of ["longitudinal", "lateral"]) {
-    const g = document.createElement("optgroup");
-    g.label = kind === "longitudinal" ? "Longitudinal (speed)" : "Lateral (steering)";
-    for (const p of cfg.passes.filter((q) => q.kind === kind)) {
-      const o = document.createElement("option"); o.value = p.name; o.textContent = p.name; g.appendChild(o);
-    }
-    sel.appendChild(g);
-  }
-  passInfo();
+  await refreshPasses();
   $("foot-log").textContent = "logging to " + cfg.log_dir;
   const es = new EventSource("/api/stream");
   es.onmessage = (ev) => {
@@ -353,6 +427,7 @@ async function init() {
     lastMsgAt = Date.now();
     record(last);
     dirty = true;
+    if (last.sysid && (last.sysid.state !== sysidSeen || last.sysid.state === "running")) pollSysid(last.sysid.state);
   };
   requestAnimationFrame(frame);
 }

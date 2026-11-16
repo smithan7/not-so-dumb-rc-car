@@ -23,6 +23,9 @@ AutonomousCar/
                         sysid_model dynamics, driveshaft encoder, virtual transmitter)
     esp32_protocol.py   Jetson <-> ESP32 protocol v2 + drivetrain seeds (copy in ROS_nsd_rc_car)
     failsafe.py         Python port of the firmware's failsafe.h, differential-tested against it
+    sysid_run.py        sessions -> fit -> gate A + hold-out -> suggested next maneuvers (JSON/CLI)
+    sysid_design.py     experiment design: Fisher information of candidate maneuvers vs what's missing
+    sysid_rehearsal.py  the whole drive -> fit -> suggest loop on the emulator with a random car
     tests/              pytest suite for the models
     *.ipynb             experiments, calibration and optimization notebooks
   archived_code/        older experiments

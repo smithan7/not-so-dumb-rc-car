@@ -28,6 +28,7 @@ import json
 import math
 import os
 import platform
+import subprocess
 import sys
 import threading
 import time
@@ -51,7 +52,7 @@ SNAPSHOT_HZ = 20.0
 # ---------------------------------------------------------------------------------------------
 
 class SessionLog:
-    def __init__(self, log_dir, port, notes=""):
+    def __init__(self, log_dir, port, notes="", imu_port=None):
         stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         path, i = os.path.join(log_dir, "session_%s_gs" % stamp), 1
         while os.path.exists(path):
@@ -65,9 +66,11 @@ class SessionLog:
                      "python": sys.version.split()[0], "notes": notes, "recorder": "ground_station.py",
                      "streams": {"esp32": {"port": port, "kind": "esp32", "file": "esp32.csv"},
                                  "cmd": {"port": port, "kind": "esp32_cmd", "file": "cmd.csv"}}}
+        if imu_port:
+            self.meta["streams"]["ola"] = {"port": imu_port, "kind": "ola", "file": "ola.csv"}
         self.lock = threading.Lock()
         self.files, self.writers, self.counts = {}, {}, {}
-        for name in ("esp32", "cmd"):
+        for name in self.meta["streams"]:
             fh = open(os.path.join(path, self.meta["streams"][name]["file"]), "w", newline="")
             w = csv.writer(fh)
             w.writerow(["t_pc_ns", "line"])
@@ -89,6 +92,12 @@ class SessionLog:
                 for fh in self.files.values():
                     fh.flush()
                 self._last_flush = time.monotonic()
+
+    def flush(self):
+        with self.lock:
+            for fh in self.files.values():
+                if not fh.closed:
+                    fh.flush()
 
     def close(self):
         with self.lock:
@@ -353,24 +362,119 @@ def course_outline(n_max=600):
             "right": (xy - half * nrm).round(3).tolist(), "width_m": c.width, "length_m": c.length}
 
 
+class ImuReader:
+    """Logs the OpenLog Artemis stream and keeps the latest yaw rate (gz, +-250 dps) for display."""
+
+    def __init__(self, port, baud, log):
+        import serial
+
+        import sysid_log
+
+        self._parse = sysid_log.parse_ola
+        self._gz_scale = math.radians(1.0) / sysid_log.GYRO_LSB_PER_DPS[250]
+        self.port, self.log = port, log
+        self.yaw_rate = None
+        self.lines = 0
+        self.error = None
+        self._running = True
+        try:
+            self.ser = serial.Serial(port, baud, timeout=0.2)
+        except (serial.SerialException, OSError) as e:
+            self.ser, self.error = None, str(e)
+        self._thread = threading.Thread(target=self._loop, name="imu_reader", daemon=True)
+        self._thread.start()
+
+    def _loop(self):
+        while self._running and self.ser is not None:
+            try:
+                raw = self.ser.readline()
+            except Exception as e:  # port gone: stop, report
+                self.error = str(e)
+                return
+            if not raw:
+                continue
+            t_ns = time.monotonic_ns()
+            text = raw.decode("ascii", "replace").strip()
+            self.log.write("ola", t_ns, text)
+            self.lines += 1
+            row = self._parse(text)
+            if row is not None:
+                self.yaw_rate = row["gz_raw"] * self._gz_scale
+
+    def snapshot(self):
+        return {"port": self.port, "lines": self.lines, "error": self.error, "yaw_rate": self.yaw_rate}
+
+    def close(self):
+        self._running = False
+        self._thread.join(timeout=1.0)
+        if self.ser is not None:
+            self.ser.close()
+
+
 class GroundStation:
-    def __init__(self, port, baud, log_dir, emulator=None, notes=""):
+    def __init__(self, port, baud, log_dir, emulator=None, notes="", imu_port=None, imu_baud=115200):
         self.emulator = emulator
         self.cfg = F.Config()
         os.makedirs(log_dir, exist_ok=True)
-        self.log = SessionLog(log_dir, port, notes=notes)
+        self.log = SessionLog(log_dir, port, notes=notes, imu_port=imu_port)
         self.link = Link(port, baud, self.log)
+        self.imu = ImuReader(imu_port, imu_baud, self.log) if imu_port else None
         self.commander = Commander(self.link)
         self.passes = {p["name"]: p for p in pass_catalog(self.cfg.auto_speed_max_us)}
         self._config = None
         self.t0 = time.monotonic()
+        self.fit_with = []          # earlier sessions to fit together with this one (--fit-with)
+        self.sysid = {"state": "idle"}
+        self._sysid_lock = threading.Lock()
+
+    # ---- system ID: fit what's logged, plan what to drive next -------------------------------
+    def start_sysid(self, max_speed_mps, n):
+        """Run sysid_run.py on this session (+ fit_with) in a subprocess: a CPU-heavy fit in this
+        process would steal the interpreter from the 50 Hz command loop."""
+        with self._sysid_lock:
+            if self.sysid["state"] == "running":
+                raise Busy("a fit is already running")
+            self.sysid = {"state": "running", "started": time.time(), "max_speed_mps": max_speed_mps}
+        threading.Thread(target=self._sysid_job, args=(max_speed_mps, n), name="sysid", daemon=True).start()
+
+    def _sysid_job(self, max_speed_mps, n):
+        try:
+            self.log.flush()
+            out = os.path.join(self.log.path, "sysid_%s.json" % datetime.datetime.now().strftime("%H%M%S"))
+            cmd = [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "sysid_run.py"),
+                   *self.fit_with, self.log.path, "--out", out, "--max-speed", str(max_speed_mps), "--n", str(n),
+                   "--throttle-max", str(self.cfg.auto_speed_max_us)]
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
+            if r.returncode != 0:
+                msg = (r.stderr or r.stdout or "").strip().splitlines()
+                raise RuntimeError(msg[-1] if msg else "sysid_run.py exited %d" % r.returncode)
+            with open(out) as fh:
+                rep = json.load(fh)
+            self._add_suggested(rep)
+            self.sysid = {"state": "done", "finished": time.time(), "report": rep, "file": out, "text": r.stdout}
+        except Exception as e:  # report it on the page; the station keeps running
+            self.sysid = {"state": "error", "finished": time.time(), "error": str(e)}
+
+    def _add_suggested(self, rep):
+        for name in [k for k, p in self.passes.items() if p["kind"] == "suggested"]:
+            del self.passes[name]
+        p_fit = fitted_params(rep["params"])
+        for s in rep["suggestions"]:
+            sched = [tuple(x) for x in s["schedule"]]
+            fp = D.footprint(sched, p_fit)
+            top = max(x[1] for x in sched)
+            self.passes[s["name"]] = {"name": s["name"], "kind": "suggested", "schedule": sched,
+                                      "duration_s": fp["duration_s"], "top_speed_mps": fp["top_speed_mps"],
+                                      "extent_m": [fp["x_extent_m"], fp["y_extent_m"]], "max_throttle_us": top,
+                                      "clamped": top > self.cfg.auto_speed_max_us, "why": s["why"]}
 
     @classmethod
-    def simulated(cls, log_dir, **kw):
+    def simulated(cls, log_dir, emulator_params=None, **kw):
         import car_emulator
 
-        emu = car_emulator.CarEmulator().start()
-        return cls(emu.port, emu.baud, log_dir, emulator=emu, notes="car_emulator", **kw)
+        emu = car_emulator.CarEmulator(params=emulator_params).start()
+        return cls(emu.port, emu.baud, log_dir, emulator=emu, notes="car_emulator", imu_port=emu.imu_port,
+                   imu_baud=emu.baud, **kw)
 
     def config(self):
         if self._config is None:
@@ -385,15 +489,18 @@ class GroundStation:
                            "jetson_timeout_ms": self.cfg.jetson_timeout_ms},
                 "drivetrain": {"edges_per_rev": P.ENCODER_EDGES_PER_REV, "diff_ratio": P.DIFF_RATIO,
                                "wheel_diameter_m": P.WHEEL_DIAMETER_M, "meters_per_edge": P.meters_per_edge()},
-                "passes": [{k: v for k, v in p.items() if k != "schedule"} for p in self.passes.values()],
                 "modes": {str(k): v for k, v in P.MODE_NAMES.items()},
                 "log_dir": self.log.path,
             }
-        return self._config
+        cfg = dict(self._config)
+        cfg["passes"] = [{k: v for k, v in p.items() if k != "schedule"} for p in list(self.passes.values())]
+        return cfg
 
     def snapshot(self):
         snap = {"t": time.monotonic() - self.t0, "link": self.link.snapshot(), "status": self.link.status,
-                "cmd": self.commander.snapshot(), "truth": None, "rc": None}
+                "imu": self.imu.snapshot() if self.imu else None,
+                "cmd": self.commander.snapshot(), "truth": None, "rc": None,
+                "sysid": {k: self.sysid.get(k) for k in ("state", "finished")}}
         if self.emulator is not None:
             snap["truth"] = self.emulator.truth()
             snap["rc"] = self.emulator.rc_state()
@@ -402,6 +509,8 @@ class GroundStation:
     def close(self):
         self.commander.close()
         self.link.close()
+        if self.imu is not None:
+            self.imu.close()
         if self.emulator is not None:
             self.emulator.stop()
         self.log.close()
@@ -412,7 +521,17 @@ class GroundStation:
 # ---------------------------------------------------------------------------------------------
 
 class ApiError(Exception):
-    pass
+    code = 400
+
+
+class Busy(ApiError):
+    code = 409
+
+
+def fitted_params(overrides):
+    import sysid_model
+
+    return sysid_model.default_params(**{k: v for k, v in overrides.items() if k in sysid_model.PARAMS})
 
 
 def _int_in(body, key, lo, hi):
@@ -466,6 +585,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, self.gs.config())
         if path == "/api/stream":
             return self._stream()
+        if path == "/api/sysid":
+            return self._send(200, self.gs.sysid)
         self._send(404, {"error": "not found"})
 
     def _static(self, name):
@@ -509,7 +630,9 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(body, dict):
                 raise ApiError("body must be a JSON object")
             result = self._post(path, body)
-        except (ApiError, ValueError) as e:
+        except ApiError as e:
+            return self._send(e.code, {"error": str(e)})
+        except ValueError as e:
             return self._send(400, {"error": str(e)})
         if result is None:
             return self._send(404, {"error": "not found"})
@@ -555,6 +678,13 @@ class Handler(BaseHTTPRequestHandler):
             if gs.emulator is None:
                 raise ApiError("not in --sim mode")
             gs.emulator.reset_car()
+        elif path == "/api/sysid/run":
+            v = body.get("max_speed_mps", 2.0)
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or not 0.3 <= v <= 8.0:
+                raise ApiError("max_speed_mps must be 0.3..8")
+            n = _int_in({"n": body.get("n", 3)}, "n", 1, 6)
+            gs.start_sysid(float(v), n)
+            return {"ok": True, "sysid": {"state": gs.sysid["state"]}}
         else:
             return None
         return {"ok": True, "cmd": cmd.snapshot()}
@@ -573,18 +703,22 @@ def main(argv=None):
     src = ap.add_mutually_exclusive_group(required=True)
     src.add_argument("--sim", action="store_true", help="drive the car emulator")
     src.add_argument("--port", help="ESP32 serial port")
+    ap.add_argument("--imu-port", help="OpenLog Artemis serial port (yaw rate for the lateral fit)")
     ap.add_argument("--baud", type=int, default=P.BAUD)
     ap.add_argument("--host", default="127.0.0.1", help="0.0.0.0 = reachable from other machines")
     ap.add_argument("--http-port", type=int, default=8080)
     ap.add_argument("--log-dir", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "logs"))
     ap.add_argument("--notes", default="")
+    ap.add_argument("--fit-with", action="append", default=[], metavar="SESSION",
+                    help="earlier session(s) to include when fitting from the page")
     ap.add_argument("--allow-host", action="append", default=[], metavar="NAME",
                     help="hostname you'll browse to (e.g. the Jetson's name); IPs and localhost always work")
     args = ap.parse_args(argv)
     log_dir = os.path.abspath(args.log_dir)
     srv = make_server(None, args.host, args.http_port, args.allow_host)  # bind first: fail before touching the car
     gs = (GroundStation.simulated(log_dir) if args.sim
-          else GroundStation(args.port, args.baud, log_dir, notes=args.notes))
+          else GroundStation(args.port, args.baud, log_dir, notes=args.notes, imu_port=args.imu_port))
+    gs.fit_with = [os.path.abspath(p) for p in args.fit_with]
     srv.gs = gs
     host = "localhost" if args.host in ("127.0.0.1", "0.0.0.0") else args.host
     print("ground station: http://%s:%d   (%s, logging to %s)" % (host, srv.server_address[1],

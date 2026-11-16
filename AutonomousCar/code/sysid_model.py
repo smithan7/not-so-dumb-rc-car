@@ -49,8 +49,11 @@ PARAMS = {
 LATERAL_FREE = ["steer_center_us", "steer_gain", "tau_steer", "v_char", "gyro_bias", "input_delay"]
 LONGITUDINAL_FREE = ["deadband_us", "speed_gain", "tau_speed", "brake_gain", "roll_decel", "drag_coeff"]
 
-# CarParam.length (28 in) looks like overall length, not axle-to-axle. MEASURE the wheelbase.
-WHEELBASE_M = CarParam.length
+# Arrma Infraction 6S BLX published wheelbase 15.98 in (406 mm). CarParam.length (28 in) is the
+# overall length (published 27.36 in), not axle-to-axle. MEASURE the real one and set it here:
+# from yaw rate alone only steer_gain / wheelbase is identifiable, and a wrong value pushes the
+# steering lock (delta_max) into the wrong place.
+WHEELBASE_M = 0.406
 
 
 def default_params(**overrides):

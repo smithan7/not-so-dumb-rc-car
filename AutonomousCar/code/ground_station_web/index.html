@@ -44,7 +44,7 @@
       <canvas id="ch-str" class="chart"></canvas>
     </div>
     <div class="card chart-card">
-      <div class="card-head"><h2>Speed <small>m/s</small></h2><span class="legend" id="lg-spd"></span></div>
+      <div class="card-head"><h2>Speed &amp; yaw rate</h2><span class="legend" id="lg-spd"></span></div>
       <canvas id="ch-spd" class="chart"></canvas>
     </div>
     <div class="card chart-card">
@@ -103,6 +103,30 @@
     </div>
     <button id="btn-custom">Run step</button>
     <p id="msg" class="msg" role="status"></p>
+  </section>
+
+  <section class="card sysid">
+    <div class="card-head"><h2>System ID</h2><span id="sysid-state" class="chip">not run</span></div>
+    <p class="hint">Fits everything logged this session, checks gate A, and plans the maneuvers that
+      would best fill what the data is missing - kept under the speed cap below, the firmware's
+      throttle clamp and the lot. Drive them, then fit again.</p>
+    <div class="fields">
+      <label>speed cap <input id="sy-speed" type="number" min="0.3" max="8" step="0.1" value="2"> m/s</label>
+      <label>maneuvers <input id="sy-n" type="number" min="1" max="6" step="1" value="3"></label>
+    </div>
+    <button id="btn-sysid" class="primary">Fit this session &amp; suggest</button>
+    <div id="sysid-out" hidden>
+      <p id="sy-verdict" class="verdict"></p>
+      <p id="sy-data" class="hint"></p>
+      <div class="table-wrap"><table id="sy-gate">
+        <thead><tr><th>parameter</th><th>value</th><th>1σ</th><th>target</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table></div>
+      <ul id="sy-checks" class="checks"></ul>
+      <h3>Drive next</h3>
+      <ol id="sy-suggest" class="suggest"></ol>
+      <p id="sy-remaining" class="hint"></p>
+    </div>
   </section>
 
 </main>

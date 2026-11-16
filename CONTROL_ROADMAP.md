@@ -113,7 +113,13 @@ Even a weak measurement helps. Target **≤ 0.2 m at ≥ 30% of frames, ≥ 10 H
 
 ### Stage 0: system ID on the real car → gate A
 
-Run the designed passes (`sysid_maneuvers.py`) with `sysid_logger.py`, then fit.
+Drive from `ground_station.py` (it logs the ESP32 and the OLA), then press **Fit this session &
+suggest** (or run `sysid_run.py <sessions>`): it fits, checks this gate, and plans the next
+maneuvers from what the data is missing (`sysid_design.py`, Fisher information under the stage's
+speed cap). Repeat drive -> fit until the gate passes, raising the speed cap one stage at a time.
+Rehearsed on the emulator (`sysid_rehearsal.py`): a random car passed in 4 rounds, ~106 s of
+maneuvers, gating parameters within 5%; drag is not identifiable at 3 m/s and leaks into
+roll_decel (treat coast-down terms as effective values for the speeds driven).
 - [ ] Wheelbase measured (axle to axle) and set in `sysid_model.WHEELBASE_M`. Throttle/steer
       PWM channels confirmed. OLA set to ±16 g. ESP32 firmware v2 flashed
       (`esp32_autopilot_interface`, timestamp echo + failsafe) with the matching `esp32_node`
