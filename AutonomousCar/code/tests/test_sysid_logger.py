@@ -97,6 +97,25 @@ def test_unwrap_utc_midnight():
     assert np.allclose(L.unwrap_clock(t, 86400), [86399.8, 86399.9, 86400.0, 86400.1])
 
 
+def test_parse_esp32_v2_lines():
+    s = L.parse_esp32("S,4294000000,1,1,6,12,1100,1580,1520,42,1580,1520,1580,1520,977,4293990000,25000,0,$")
+    assert s["kind"] == "S" and s["mode"] == 1 and s["t_dev"] == pytest.approx(4294.0)
+    a = L.parse_esp32("A,42,123450000,1,1580,1520,$")
+    assert a["kind"] == "A" and a["t_dev"] == pytest.approx(123.45)
+    assert L.parse_esp32("C,7,1520,1580,107") is None
+    assert L.classify_line("S,1,1,1,6,12,1100,1580,1520,42,1580,1520,1580,1520,977,0,0,0,$") == "esp32"
+
+
+def test_esp32_micros_wrap_is_unwrapped_in_alignment():
+    t_pc = np.arange(0, 2.0, 0.02) + 0.003
+    us = (np.arange(len(t_pc)) * 20000 + 2 ** 32 - 1000000) % 2 ** 32  # wraps 1 s in
+    df = L.parse_stream(t_pc, ["S,%d,0,1,6,-1,1900,1500,1500,0,1500,1500,1500,1500,0,0,0,0,$" % u for u in us],
+                        "esp32")
+    L._apply_alignment(df, "t_dev", period=L.DEVICE_CLOCK_PERIOD["esp32"])
+    assert np.all(np.diff(df["t"]) > 0)
+    assert np.allclose(np.diff(df["t"]), 0.02, atol=1e-6)
+
+
 # --- recorder end to end --------------------------------------------------------------------
 
 class FakeSerial:

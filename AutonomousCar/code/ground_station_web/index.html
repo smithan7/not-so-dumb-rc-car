@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ground Station</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M8 1 15 15 8 11 1 15z' fill='%232563eb'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="bar">
+  <div class="brand">Ground Station <span id="sim-badge" class="badge" hidden>emulator</span></div>
+  <div id="mode" class="mode mode-unknown" aria-live="polite">
+    <span class="mode-label">mode</span><span id="mode-name">waiting for car</span>
+  </div>
+  <dl class="stats">
+    <div><dt>armed</dt><dd id="armed">–</dd></div>
+    <div><dt>speed</dt><dd><span id="speed">–</span> <small>m/s</small></dd></div>
+    <div><dt>receiver age</dt><dd><span id="rc-age">–</span> <small>ms</small></dd></div>
+    <div><dt>Jetson cmd age</dt><dd><span id="j-age">–</span> <small>ms</small></dd></div>
+    <div><dt>round trip</dt><dd><span id="rtt">–</span> <small>ms</small></dd></div>
+    <div><dt>link</dt><dd id="link">–</dd></div>
+  </dl>
+</header>
+
+<main class="grid">
+  <section class="card map-card">
+    <div class="card-head">
+      <h2>Lot</h2>
+      <span class="legend"><i class="sw sw-edge"></i>course edges <i class="sw sw-trail"></i>trail <i class="sw sw-car"></i>car</span>
+    </div>
+    <div class="map-wrap"><canvas id="map"></canvas><div id="map-note" class="overlay" hidden></div></div>
+    <div class="map-foot"><span id="pose">–</span><button id="clear-trail" class="ghost small">Clear trail</button></div>
+  </section>
+
+  <div class="right">
+  <section class="charts">
+    <div class="card chart-card">
+      <div class="card-head"><h2>Throttle <small>µs</small></h2><span class="legend" id="lg-thr"></span></div>
+      <canvas id="ch-thr" class="chart"></canvas>
+    </div>
+    <div class="card chart-card">
+      <div class="card-head"><h2>Steering <small>µs</small></h2><span class="legend" id="lg-str"></span></div>
+      <canvas id="ch-str" class="chart"></canvas>
+    </div>
+    <div class="card chart-card">
+      <div class="card-head"><h2>Speed <small>m/s</small></h2><span class="legend" id="lg-spd"></span></div>
+      <canvas id="ch-spd" class="chart"></canvas>
+    </div>
+    <div class="card chart-card">
+      <div class="card-head"><h2>Link <small>ms</small></h2><span class="legend" id="lg-lnk"></span></div>
+      <canvas id="ch-lnk" class="chart"></canvas>
+    </div>
+  </section>
+  <section class="card controls" id="sim-panel" hidden>
+    <div class="card-head"><h2>Virtual transmitter</h2><span class="chip">emulator only</span></div>
+    <div class="row">
+      <button id="tx-power" class="toggle" aria-pressed="false">Transmitter off</button>
+      <button id="tx-ch3" class="toggle" aria-pressed="false">ch3: auto</button>
+    </div>
+    <div class="slider"><label for="tx-thr">throttle</label><input id="tx-thr" type="range" min="1300" max="1800" step="5" value="1500"><output id="tx-thr-v">1500</output></div>
+    <div class="slider"><label for="tx-str">steering</label><input id="tx-str" type="range" min="1100" max="1900" step="10" value="1500"><output id="tx-str-v">1500</output></div>
+    <div class="row">
+      <button id="tx-center" class="ghost">Centre sticks</button>
+      <button id="sim-reset" class="ghost">Reset car to start</button>
+    </div>
+    <p class="hint">To hand over: transmitter on, ch3 to manual, <b>send neutral</b>, wait until
+      "Jetson cmd age" is a few ms, then ch3 to auto. Flipping before commands arrive is a failsafe
+      and disarms - flip to manual and back to re-arm.</p>
+  </section>
+  </div>
+
+  <section class="card controls">
+    <div class="card-head"><h2>Jetson commands</h2><span id="cmd-state" class="chip">off</span></div>
+    <p class="hint">What the ground station sends in place of the Jetson. The car only follows it in
+      <b>auto</b> (transmitter ch3 down, armed by flipping to manual and back). Stopping the car is
+      the transmitter's job, not this page's.</p>
+    <div class="row">
+      <button id="btn-hold">Send neutral</button>
+      <button id="btn-release" class="ghost">Stop sending</button>
+    </div>
+
+    <h3>Hold to drive</h3>
+    <div class="slider"><label for="jog-thr">throttle</label><input id="jog-thr" type="range" min="1300" max="1700" step="5" value="1550"><output id="jog-thr-v">1550</output></div>
+    <div class="slider"><label for="jog-str">steering</label><input id="jog-str" type="range" min="1100" max="1900" step="10" value="1500"><output id="jog-str-v">1500</output></div>
+    <button id="btn-jog" class="primary hold">Hold to drive</button>
+
+    <h3>Test passes</h3>
+    <div class="row"><select id="pass-select" aria-label="test pass"></select></div>
+    <p id="pass-info" class="hint"></p>
+    <div class="row">
+      <button id="btn-pass">Run pass</button>
+      <button id="btn-pass-stop" class="ghost">Stop pass</button>
+    </div>
+    <div class="progress" aria-hidden="true"><div id="pass-progress"></div></div>
+    <p id="pass-now" class="hint"></p>
+
+    <h3>Custom throttle step</h3>
+    <div class="fields">
+      <label>throttle <input id="cs-thr" type="number" min="1300" max="1700" step="5" value="1545"> µs</label>
+      <label>hold <input id="cs-hold" type="number" min="0.2" max="10" step="0.1" value="2"> s</label>
+      <label>steer <input id="cs-str" type="number" min="900" max="2100" step="10" value="1500"> µs</label>
+    </div>
+    <button id="btn-custom">Run step</button>
+    <p id="msg" class="msg" role="status"></p>
+  </section>
+
+</main>
+
+<footer class="foot"><span id="foot-log">–</span><span id="foot-lines">–</span></footer>
+<script src="/static/app.js"></script>
+</body>
+</html>

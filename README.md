@@ -17,6 +17,12 @@ AutonomousCar/
     read_pwm/read_pwm.ino  Arduino/ESP32 RC-receiver PWM reader
     esp32_autopilot_interface/  car-side ESP32 firmware: receiver/Jetson arbitration, failsafe,
                         driveshaft optical encoder, serial protocol v2 (failsafe.h is unit-tested on a PC)
+    ground_station.py   web ground station: live mode/inputs/speed/link, lot map, hold-to-drive,
+                        sysid passes, session logging (python ground_station.py --sim, open the URL)
+    car_emulator.py     the car + ESP32 firmware on a virtual serial port (protocol v2, failsafe.py,
+                        sysid_model dynamics, driveshaft encoder, virtual transmitter)
+    esp32_protocol.py   Jetson <-> ESP32 protocol v2 + drivetrain seeds (copy in ROS_nsd_rc_car)
+    failsafe.py         Python port of the firmware's failsafe.h, differential-tested against it
     tests/              pytest suite for the models
     *.ipynb             experiments, calibration and optimization notebooks
   archived_code/        older experiments

@@ -28,6 +28,8 @@ import warnings
 import numpy as np
 import pandas as pd
 
+import esp32_protocol
+
 # ---------------------------------------------------------------------------------------------
 # line classification / parsing
 # ---------------------------------------------------------------------------------------------
@@ -41,7 +43,7 @@ OLA_FIELDS = ["q1", "q2", "q3", "head_acc",
 
 
 def classify_line(line):
-    """Return the stream kind a line belongs to: 'ola', 'gps', 'pwm', 'cmd' or None."""
+    """Return the stream kind a line belongs to: 'ola', 'gps', 'pwm', 'esp32', 'cmd' or None."""
     s = line.strip()
     if not s:
         return None
@@ -50,6 +52,8 @@ def classify_line(line):
     if s.startswith("PWM"):
         return "pwm"
     head = s.split(",", 1)[0].strip()
+    if head in ("S", "A") and esp32_protocol.parse_line(s) is not None:
+        return "esp32"
     if _OLA_DATE.match(head):
         return "ola"
     if head in ("C", "Z", "E"):
@@ -168,7 +172,18 @@ def parse_pwm(line):
     return row
 
 
-PARSERS = {"ola": parse_ola, "gps": parse_gps, "pwm": parse_pwm}
+def parse_esp32(line):
+    """ESP32 firmware protocol v2 status ('S') / ack ('A') line; t_dev = the ESP32's micros()."""
+    d = esp32_protocol.parse_line(line)
+    if d is None:
+        return None
+    d["t_dev"] = (d["now_us"] if d["kind"] == "S" else d["rx_us"]) / 1e6
+    return d
+
+
+PARSERS = {"ola": parse_ola, "gps": parse_gps, "pwm": parse_pwm, "esp32": parse_esp32}
+# device clocks that wrap: ESP32 micros() is a uint32
+DEVICE_CLOCK_PERIOD = {"esp32": 2 ** 32 / 1e6}
 
 # ---------------------------------------------------------------------------------------------
 # clock alignment
@@ -304,7 +319,8 @@ def load_session(session_dir):
             out["alignment"][name] = report
         elif kind in PARSERS:
             df = parse_stream(t_pc, lines, kind)
-            out["alignment"][name] = _apply_alignment(df, "t_dev") if len(df) else {}
+            out["alignment"][name] = (_apply_alignment(df, "t_dev", period=DEVICE_CLOCK_PERIOD.get(kind))
+                                      if len(df) else {})
         else:  # unknown / command streams: keep raw lines with PC time
             df = pd.DataFrame({"t_pc": t_pc, "line": lines})
             df["t"] = df["t_pc"]
