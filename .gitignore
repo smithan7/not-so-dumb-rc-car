@@ -8,3 +8,5 @@ __pycache__/
 venv/
 # scapy was committed as a bare gitlink; clone it separately if needed (pip install scapy is simpler)
 AutonomousCar/code/scapy/
+# session logs from sysid_logger.py / ground_station.py (large; keep them out of git)
+AutonomousCar/logs/
