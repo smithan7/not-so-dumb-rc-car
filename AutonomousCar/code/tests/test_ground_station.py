@@ -130,6 +130,40 @@ def test_jog_rejects_out_of_range(station):
     assert post(base, "/api/jog", {"speed_us": "fast"})[0] == 400
 
 
+def raw_post(base, path, data, headers):
+    req = urllib.request.Request(base + path, data=data, method="POST", headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=3) as r:
+            return r.status
+    except urllib.error.HTTPError as e:
+        return e.code
+
+
+def test_cross_site_requests_cannot_drive_the_car(station):
+    """A web page elsewhere in the operator's browser must not be able to command the car."""
+    _, base = station
+    body = json.dumps({"speed_us": 1700, "steer_us": 1500}).encode()
+    # a plain cross-site form/fetch POST (no preflight) uses a "simple" content type
+    assert raw_post(base, "/api/jog", body, {"Content-Type": "text/plain"}) == 415
+    assert raw_post(base, "/api/jog", body, {}) == 415
+    # JSON from another origin
+    assert raw_post(base, "/api/jog", body, {"Content-Type": "application/json",
+                                             "Origin": "http://evil.example"}) == 403
+    # DNS rebinding: attacker's name resolving to 127.0.0.1 -> same-origin, but Host is theirs
+    assert raw_post(base, "/api/jog", body, {"Content-Type": "application/json",
+                                             "Host": "evil.example:8080"}) == 403
+    req = urllib.request.Request(base + "/api/config", headers={"Host": "evil.example"})
+    with pytest.raises(urllib.error.HTTPError) as e:
+        urllib.request.urlopen(req, timeout=3)
+    assert e.value.code == 403
+    # the page itself: same origin, JSON
+    port = base.rsplit(":", 1)[1]
+    assert raw_post(base, "/api/hold", b"{}", {"Content-Type": "application/json; charset=utf-8",
+                                               "Origin": "http://127.0.0.1:" + port}) == 200
+    assert raw_post(base, "/api/hold", b"{}", {"Content-Type": "application/json",
+                                               "Host": "localhost:" + port, "Origin": "http://localhost:" + port}) == 200
+
+
 def test_run_and_stop_a_pass(station):
     gs, base = station
     arm(base)

@@ -15,12 +15,15 @@ What it does
 
 It is not a safety device: stopping the car is the transmitter's ch3 switch / the ESP32's job.
 Anyone who can reach the page can drive the car - keep --host on 127.0.0.1 unless you need it.
+Other web pages open in your browser cannot: POSTs must be same-origin JSON, and the Host header
+must be an IP address, localhost or an --allow-host name (blocks DNS rebinding).
 No dependencies beyond pyserial (standard-library HTTP server, Server-Sent Events).
 """
 
 import argparse
 import csv
 import datetime
+import ipaddress
 import json
 import math
 import os
@@ -29,6 +32,7 @@ import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlsplit
 
 import numpy as np
 
@@ -437,7 +441,22 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _host_ok(self):
+        """Host header must be an IP literal, localhost, or explicitly allowed: a rebound DNS name
+        (attacker.com -> 127.0.0.1) would otherwise make the attacker's page 'same-origin'."""
+        host = (self.headers.get("Host") or "").strip().lower()
+        name = urlsplit("//" + host).hostname or ""
+        if name == "localhost" or name in self.server.allowed_hosts:
+            return True
+        try:
+            ipaddress.ip_address(name)
+            return True
+        except ValueError:
+            return False
+
     def do_GET(self):
+        if not self._host_ok():
+            return self._send(403, {"error": "unexpected Host header"})
         path = self.path.split("?", 1)[0]
         if path in ("/", "/index.html"):
             return self._static("index.html")
@@ -474,6 +493,15 @@ class Handler(BaseHTTPRequestHandler):
             pass
 
     def do_POST(self):
+        # Only same-origin JSON can command the car. A cross-site page can send "simple" POSTs
+        # (form / text/plain) without a CORS preflight; JSON forces a preflight we never answer.
+        if not self._host_ok():
+            return self._send(403, {"error": "unexpected Host header"})
+        if (self.headers.get("Content-Type") or "").split(";")[0].strip().lower() != "application/json":
+            return self._send(415, {"error": "Content-Type must be application/json"})
+        origin = self.headers.get("Origin")
+        if origin is not None and urlsplit(origin).netloc.lower() != (self.headers.get("Host") or "").lower():
+            return self._send(403, {"error": "cross-origin request"})
         path = self.path.split("?", 1)[0]
         try:
             n = int(self.headers.get("Content-Length") or 0)
@@ -532,10 +560,11 @@ class Handler(BaseHTTPRequestHandler):
         return {"ok": True, "cmd": cmd.snapshot()}
 
 
-def make_server(gs, host, port):
+def make_server(gs, host, port, allowed_hosts=()):
     srv = ThreadingHTTPServer((host, port), Handler)
     srv.daemon_threads = True
     srv.gs = gs
+    srv.allowed_hosts = {h.lower() for h in allowed_hosts}
     return srv
 
 
@@ -549,11 +578,14 @@ def main(argv=None):
     ap.add_argument("--http-port", type=int, default=8080)
     ap.add_argument("--log-dir", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "logs"))
     ap.add_argument("--notes", default="")
+    ap.add_argument("--allow-host", action="append", default=[], metavar="NAME",
+                    help="hostname you'll browse to (e.g. the Jetson's name); IPs and localhost always work")
     args = ap.parse_args(argv)
     log_dir = os.path.abspath(args.log_dir)
+    srv = make_server(None, args.host, args.http_port, args.allow_host)  # bind first: fail before touching the car
     gs = (GroundStation.simulated(log_dir) if args.sim
           else GroundStation(args.port, args.baud, log_dir, notes=args.notes))
-    srv = make_server(gs, args.host, args.http_port)
+    srv.gs = gs
     host = "localhost" if args.host in ("127.0.0.1", "0.0.0.0") else args.host
     print("ground station: http://%s:%d   (%s, logging to %s)" % (host, srv.server_address[1],
           "emulator " + gs.link.port if args.sim else gs.link.port, gs.log.path), flush=True)
