@@ -206,3 +206,35 @@ def test_session_log_loads_in_sysid_log(station, tmp_path):
     assert (esp["kind"] == "A").any() and (esp["kind"] == "S").any()
     assert len(sess["cmd"]) > 10  # commands sent, raw
     assert sess["meta"]["streams"]["esp32"]["kind"] == "esp32"
+    ola = sess["ola"]  # the IMU, logged alongside and time-aligned
+    assert len(ola) > 40 and "gz_raw" in ola.columns and ola["t"].is_monotonic_increasing
+
+
+def test_fit_and_suggest_from_the_page(station):
+    gs, base = station
+    arm(base)
+    assert post(base, "/api/pass/start", {"custom": {"throttle_us": 1570, "hold_s": 2.0, "steer_us": 1500}})[0] == 200
+    time.sleep(6.5)
+    status, body = post(base, "/api/sysid/run", {"max_speed_mps": 2.0, "n": 2})
+    assert status == 200 and body["sysid"]["state"] == "running"
+    assert post(base, "/api/sysid/run", {"max_speed_mps": 2.0})[0] == 409  # one at a time
+    t_end = time.time() + 300
+    while time.time() < t_end:
+        sy = json.loads(get(base, "/api/sysid")[2])
+        if sy["state"] != "running":
+            break
+        time.sleep(0.5)
+    assert sy["state"] == "done", sy.get("error")
+    rep = sy["report"]
+    assert rep["pieces"] and {r["param"] for r in rep["gate"]} >= {"speed_gain", "input_delay"}
+    assert rep["suggestions"]
+    names = [p["name"] for p in json.loads(get(base, "/api/config")[2])["passes"]]
+    assert rep["suggestions"][0]["name"] in names  # runnable from the pass list
+    assert post(base, "/api/pass/start", {"name": rep["suggestions"][0]["name"]})[0] == 200
+    assert post(base, "/api/sysid/run", {"max_speed_mps": 99})[0] == 400
+
+
+def test_live_yaw_rate_from_imu(station):
+    _, base = station
+    s = wait_snapshot(base, lambda s: s["imu"] is not None and s["imu"]["yaw_rate"] is not None)
+    assert s is not None and abs(s["imu"]["yaw_rate"]) < 0.2  # parked: gyro bias + noise only

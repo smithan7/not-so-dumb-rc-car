@@ -159,6 +159,34 @@ def test_manual_driving_moves_the_car_and_encoder(emu):
     assert P.wheel_speed_mps(rpm) == pytest.approx(tr["v"], rel=0.3)
 
 
+def test_imu_port_speaks_ola_with_true_yaw_rate():
+    import sysid_log as L
+
+    e = E.CarEmulator(seed=3, imu_gyro_bias=0.01)
+    e.start()
+    try:
+        e.set_rc(on=True, ch3=1900, speed_us=1570, steer_us=1650)
+        time.sleep(2.0)
+        imu = serial.Serial(e.imu_port, e.baud, timeout=0.5)
+        imu.reset_input_buffer()
+        rows, t_end = [], time.time() + 1.0
+        while time.time() < t_end:
+            r = L.parse_ola(imu.readline().decode())
+            if r:
+                rows.append(r)
+        truth = e.truth()
+        imu.close()
+    finally:
+        e.stop()
+    assert 75 <= len(rows) <= 100  # ~88 Hz, like the OLA
+    # the car is still speeding up, so compare the last ~0.17 s with the true value at the end
+    gz = np.mean([r["gz_raw"] for r in rows[-15:]]) * math.radians(1.0) / L.GYRO_LSB_PER_DPS[250]
+    assert gz == pytest.approx(truth["yaw_rate"] + 0.01, abs=0.05)
+    assert abs(truth["yaw_rate"]) > 0.3
+    az_g = np.mean([r["az_raw"] for r in rows]) / L.ACCEL_LSB_PER_G[16]
+    assert az_g == pytest.approx(1.0, abs=0.05)  # OLA set to +-16 g (gate A)
+
+
 def test_micros_wraps_like_the_esp32():
     e = E.CarEmulator(seed=2, micros_start=2 ** 32 - 300000)  # wraps 0.3 s in
     e.start()

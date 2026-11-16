@@ -12,14 +12,18 @@ pointed at the printed port instead and will see what it would see on the car:
   bicycle model with understeer) plus position, stepped in real time
 - driveshaft encoder: rising edges from the drivetrain seeds (2.8:1 diff, 100 mm tyre, 2 edges/rev)
 - a virtual RC transmitter: power, the ch3 MANUAL/AUTO switch, throttle and steering sticks
+- an OpenLog Artemis IMU on a second port (imu_port): its exact line format at ~88 Hz, RTC
+  timestamps, gyro at +-250 dps with bias and noise, accelerometer at +-16 g
 
 The true pose (truth()) is only for display / testing - the real car has no such thing.
 """
 
 import argparse
 import collections
+import datetime
 import math
 import os
+import random
 import threading
 import time
 import tty
@@ -28,7 +32,7 @@ import esp32_protocol as P
 import failsafe as F
 import sysid_model as M
 
-WHEELBASE_M = 0.406  # Arrma Infraction published wheelbase (measure the real one)
+WHEELBASE_M = M.WHEELBASE_M  # one source of truth: sysid_model
 _U32 = 2 ** 32
 
 
@@ -102,8 +106,13 @@ class Plant:
 class CarEmulator:
     """The ESP32 firmware + car, running in a background thread behind a pty."""
 
+    IMU_HZ = 88.0
+    GYRO_LSB_PER_RADS = 131.0 / math.radians(1.0)  # +-250 dps
+    ACCEL_LSB_PER_MS2 = 2048.0 / 9.80665           # +-16 g
+
     def __init__(self, params=None, seed=0, micros_start=0, pose=(7.0, 3.5, 0.0), cfg=None, servo_hz=50.0,
-                 loop_s=0.001, status_period_s=0.020, wheelbase=WHEELBASE_M):
+                 loop_s=0.001, status_period_s=0.020, wheelbase=WHEELBASE_M, imu_gyro_bias=0.008,
+                 imu_gyro_noise=0.02, rtc_start=datetime.datetime(2026, 11, 15, 12, 0, 0)):
         self.p = M.default_params(gyro_bias=0.0, **(params or {}))
         self.plant = Plant(self.p, wheelbase=wheelbase, pose=pose)
         self.start_pose = pose
@@ -124,6 +133,13 @@ class CarEmulator:
         self.port = os.ttyname(self.slave)
         # any baud works on a pty; 115200 avoids pyserial's macOS-only ioctl for 460800, which ptys reject
         self.baud = 115200
+        self.imu_master, self.imu_slave = os.openpty()
+        tty.setraw(self.imu_slave)
+        os.set_blocking(self.imu_master, False)
+        self.imu_port = os.ttyname(self.imu_slave)
+        self.imu_gyro_bias, self.imu_gyro_noise = imu_gyro_bias, imu_gyro_noise
+        self.rtc_start = rtc_start
+        self._rng = random.Random(seed)
         self._reset_firmware()
 
     # ---- control (thread-safe) ----------------------------------------------------------
@@ -159,7 +175,7 @@ class CarEmulator:
         self._running = False
         if self._thread:
             self._thread.join(timeout=2.0)
-        for fd in (self.master, self.slave):
+        for fd in (self.master, self.slave, self.imu_master, self.imu_slave):
             try:
                 os.close(fd)
             except OSError:
@@ -178,6 +194,8 @@ class CarEmulator:
         self._delay_line = collections.deque()  # (t, speed_us, steer_us) as the actuators get them
         self._next_frame = 0.0
         self._next_status = 0.0
+        self._next_imu = 0.0
+        self._v_prev = 0.0
 
     def _micros(self, t):
         return (int((t - self._t0) * 1e6) + self.micros_start) % _U32
@@ -190,6 +208,25 @@ class CarEmulator:
             os.write(self.master, line.encode("ascii"))
         except (BlockingIOError, OSError):
             pass  # nobody reading: the UART buffer overflows and lines are lost, as on the car
+
+    def _imu_line(self, t, accel_long):
+        """One OpenLog Artemis line (sysid_log.OLA_FIELDS order), raw ICM-20948 counts."""
+        pl, rng = self.plant, self._rng
+        rtc = self.rtc_start + datetime.timedelta(seconds=t - self._t0)
+        r = pl.yaw_rate + self.imu_gyro_bias + rng.gauss(0.0, self.imu_gyro_noise)
+        a_lat = pl.v * pl.yaw_rate
+
+        def cnt(x, scale):
+            return max(-32768, min(32767, int(round(x * scale))))
+
+        ax = cnt(accel_long + rng.gauss(0, 0.05), self.ACCEL_LSB_PER_MS2)
+        ay = cnt(a_lat + rng.gauss(0, 0.05), self.ACCEL_LSB_PER_MS2)
+        az = cnt(9.80665 + rng.gauss(0, 0.05), self.ACCEL_LSB_PER_MS2)
+        gx, gy = cnt(rng.gauss(0, 0.01), self.GYRO_LSB_PER_RADS), cnt(rng.gauss(0, 0.01), self.GYRO_LSB_PER_RADS)
+        gz = cnt(r, self.GYRO_LSB_PER_RADS)
+        return "%s,%s,0.00000,0.00000,0.00000,0,%d,%d,%d,%d,%d,%d,0,0,0,%.3f,\r\n" % (
+            rtc.strftime("%m/%d/%Y"), rtc.strftime("%H:%M:%S.") + "%02d" % (rtc.microsecond // 10000),
+            ax, ay, az, gx, gy, gz, self.IMU_HZ)
 
     def _actuators_at(self, t):
         """Pulse widths the ESC/servo act on at time t: latched frames, delayed by input_delay."""
@@ -274,6 +311,17 @@ class CarEmulator:
                     self._micros(t), out.mode, 1 if out.armed else 0, rc_age, j_age, rc_live["ch3"],
                     rc_live["speed_us"], rc_live["steer_us"], j["seq"], j["speed_us"], j["steer_us"], out.speed_us,
                     out.steer_us, self._enc["count"], self._enc["last_us"], self._enc["dt_us"], self._bad_cmds))
+            if t >= self._next_imu:
+                period = 1.0 / self.IMU_HZ
+                self._next_imu += period * max(1, math.floor((t - self._next_imu) / period) + 1)
+                with self.lock:
+                    accel = (self.plant.v - self._v_prev) / max(dt_total, 1e-3)
+                    self._v_prev = self.plant.v
+                    line = self._imu_line(t, accel)
+                try:
+                    os.write(self.imu_master, line.encode("ascii"))
+                except (BlockingIOError, OSError):
+                    pass
             time.sleep(self.loop_s)
 
 

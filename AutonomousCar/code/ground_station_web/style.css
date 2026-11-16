@@ -100,14 +100,14 @@ h3 { font-size: 12px; font-weight: 600; color: var(--muted); text-transform: upp
 .grid {
   display: grid; gap: 14px; padding: 14px 16px;
   grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr);
-  grid-template-areas: "map right" "controls right";
+  grid-template-areas: "map right" "controls right" "sysid right";
 }
 .map-card { grid-area: map; }
 .right { grid-area: right; display: grid; gap: 14px; align-content: start; min-width: 0; }
 .charts { display: grid; gap: 14px; align-content: start; }
 .grid > .controls { grid-area: controls; }
 @media (max-width: 980px) {
-  .grid { grid-template-columns: minmax(0, 1fr); grid-template-areas: "map" "controls" "right"; padding: 12px 16px; }
+  .grid { grid-template-columns: minmax(0, 1fr); grid-template-areas: "map" "controls" "sysid" "right"; padding: 12px 16px; }
   .right #sim-panel { order: -1; }
 }
 .card { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px 14px; min-width: 0; }
@@ -156,3 +156,21 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
 .msg.err { color: var(--fail); }
 
 .foot { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; padding: 4px 16px 18px; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+
+/* ---- system ID ---- */
+.sysid { grid-area: sysid; }
+.verdict { font-weight: 700; font-size: 15px; margin: 14px 0 2px; }
+.verdict.pass { color: var(--manual); } .verdict.fail { color: var(--warn); }
+.table-wrap { overflow-x: auto; }
+#sy-gate { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 6px; }
+#sy-gate th { text-align: left; color: var(--muted); font-weight: 600; padding: 4px 6px; border-bottom: 1px solid var(--line); }
+#sy-gate td { padding: 4px 6px; border-bottom: 1px solid var(--grid); white-space: nowrap; }
+#sy-gate td:nth-child(2), #sy-gate td:nth-child(3), #sy-gate td:nth-child(4) { text-align: right; }
+#sy-gate tr.gating td:first-child::after { content: " *"; color: var(--muted); }
+.okmark { color: var(--manual); font-weight: 700; } .nomark { color: var(--warn); font-weight: 700; }
+.checks { list-style: none; padding: 0; margin: 10px 0 0; font-size: 12px; color: var(--muted); }
+.checks li { margin: 2px 0; }
+.suggest { padding-left: 20px; margin: 0; }
+.suggest li { margin: 0 0 10px; }
+.suggest .name { font-weight: 600; }
+.suggest .why { color: var(--muted); font-size: 12px; margin: 2px 0 6px; }
